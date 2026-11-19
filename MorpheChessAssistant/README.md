@@ -4,7 +4,7 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 
 ## Supported game screens
 
-- **Online games:** hooks the general `RealGameActivity` used by Chess.com's online game flow. This includes game formats that route through that screen, such as live games and other online game types supported by this app version.
+- **Online games:** hooks the general `RealGameActivity` used by Chess.com's online game flow. This includes formats that route through that screen, such as live games and other online game types supported by this app version.
 - **Play vs Bots:** hooks the dedicated `BotGameActivityV2` used for Chess.com's bot games, including games started from the app's online/offline bot flow.
 - **Standalone analysis:** hooks `StandaloneAnalysisActivityV2` for analysis and review.
 
@@ -13,17 +13,19 @@ The game-mode coverage is based on the activities and board classes recovered fr
 ## Visual features
 
 - Stockfish score/evaluation panel.
-- Best-move arrow drawn over the native board.
-- Blue highlight on the move's origin square and green highlight on its destination.
+- Up to three candidate moves from a MultiPV analysis: **best**, **good/medium**, and **least favorable**.
+- Three colored arrows drawn over the native board, with text badges that identify each move and show its evaluation.
+- The least favorable candidate is labeled **RUIM** only when its evaluation is at least 1.20 pawns worse than the best line, or it allows a forced mate against the side to move. Otherwise it is labeled **MENOS BOA** to avoid misclassifying a reasonable move.
+- Blue highlight on the best move's origin square and green highlight on its destination.
 - Board orientation handling for flipped and normal views.
 - Old arrows/highlights are cleared when the position changes or the board disappears.
 - The extension never moves a piece, clicks a square, or sends a move to Chess.com.
 
 ## Engine connectivity and privacy
 
-The current patch requests analysis from `https://stockfish.online/api/s/v2.php` over HTTPS at depth 12. The Stockfish service requires an internet connection for each new position. The patch does not include an on-device Stockfish engine.
+The extension first sends the board FEN to `https://chess-api.com/v1` over HTTPS, requesting up to five MultiPV variations at depth 12. It uses the first, second and least favorable of the returned candidate lines for the three labels. If that service is unavailable, it falls back to `https://stockfish.online/api/s/v2.php`, which provides a single best move rather than MultiPV alternatives.
 
-The board FEN is sent to the external Stockfish Online service for analysis. The extension does not intentionally send a username, account token, game identifier, or other account data. Do not use it with private positions if you do not want their FEN sent to that service.
+An internet connection is required for each new position. The patch does not include an on-device Stockfish engine. The FEN position is sent to the external analysis provider; do not use it with private positions if you do not want their FEN sent to those services.
 
 ## Compatibility
 
@@ -41,4 +43,4 @@ The output is in `patches/build/libs/`.
 
 ## Verification status
 
-The target APK structure was inspected. The dedicated bot activity, the general online-game activity, the native `ChessBoardView`, and the standard-position FEN accessor were recovered from version 4.10.28. The Morphe bundle must compile for the exact commit before distribution. Runtime rendering still needs confirmation on an Android device with this Chess.com version; successful compilation alone does not prove that the overlay renders correctly in every game format.
+The target APK structure was inspected, and the patch bundle was compiled successfully by GitHub Actions. The generated `.mpp` archive passed an integrity check. Runtime rendering and live MultiPV responses still need confirmation on an Android device with this Chess.com version; successful compilation alone does not prove that the overlay renders correctly or that the external API returns multiple candidate lines for every position.

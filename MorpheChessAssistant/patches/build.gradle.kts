@@ -3,11 +3,11 @@ group = "app.k00byme"
 patches {
     about {
         name = "Chess Assistant"
-        description = "Stockfish move arrow, board-square highlights and evaluation for Chess.com bot games and standalone analysis."
-        source = "https://github.com/k00byme/Revangetest/tree/morphe-chess-assistant/MorpheChessAssistant"
+        description = "Stockfish MultiPV suggestions (best, good and least favorable), labeled arrows and evaluation for Chess.com online games, bot games and analysis."
+        source = "https://github.com/k00byme/Test/tree/chess-assistant-mirror/MorpheChessAssistant"
         author = "k00byme"
         contact = "GitHub issues"
-        website = "https://github.com/k00byme/Revangetest"
+        website = "https://github.com/k00byme/Test"
         license = "GPLv3"
     }
 }

@@ -12,7 +12,7 @@ private const val EXTENSION_CLASS = "Lapp/k00byme/chessassistant/extension/Chess
 @Suppress("unused")
 val chessAssistantPatch = patch(
     name = "Stockfish board assistant",
-    description = "Shows a Stockfish move arrow, source/destination highlights and evaluation in online games, bot games and standalone analysis.",
+    description = "Shows the best, good and less favorable Stockfish MultiPV moves with labeled arrows in online games, bot games and standalone analysis.",
     default = true
 ) {
     compatibleWith(Constants.CHESS_COM_COMPATIBILITY)
