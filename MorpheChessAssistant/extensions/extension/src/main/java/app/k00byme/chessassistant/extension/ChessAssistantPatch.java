@@ -562,7 +562,6 @@ public final class ChessAssistantPatch {
 
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
             ArrayList<CandidateMove> found = new ArrayList<>();
-            boolean receivedBestMove = false;
             long deadline = System.currentTimeMillis() + 15500L;
 
             while (System.currentTimeMillis() < deadline) {
@@ -574,30 +573,32 @@ public final class ChessAssistantPatch {
                 }
                 if (message == null) break;
 
+                String trimmed = message.trim();
                 JSONObject json;
                 try {
-                    json = new JSONObject(message);
+                    if (trimmed.toLowerCase(java.util.Locale.US).startsWith("bestmove ")) {
+                        String[] tokens = trimmed.split("\\s+");
+                        json = new JSONObject();
+                        json.put("type", "bestmove");
+                        if (tokens.length > 1) json.put("move", tokens[1]);
+                    } else {
+                        json = new JSONObject(trimmed);
+                    }
                 } catch (Exception ignored) {
                     continue;
                 }
 
                 String type = json.optString("type", "").toLowerCase(java.util.Locale.US);
-                if ("error".equals(type)) {
-                    return EngineResult.error(json.optString("text", "erro do serviço MultiPV"));
+                if ("error".equals(type) || json.has("error")) {
+                    return EngineResult.error(json.optString("text",
+                            json.optString("error", "erro do serviço MultiPV")));
                 }
 
-                CandidateMove candidate = parseCandidate(json, whiteToMove);
-                if (candidate != null) {
-                    addOrUpdateCandidate(found, candidate);
-                }
+                collectCandidatePayload(json, whiteToMove, found);
 
-                // Chess API streams variant candidates as "move" messages and marks
-                // the completed analysis with a final "bestmove" message.
-                if ("bestmove".equals(type)) {
-                    receivedBestMove = true;
-                    break;
-                }
-                if (found.size() >= ENGINE_VARIANTS) break;
+                // Keep collecting and refreshing unique move candidates until the
+                // service marks the analysis complete with its final bestmove event.
+                if ("bestmove".equals(type)) break;
             }
 
             if (found.isEmpty()) {
@@ -644,13 +645,29 @@ public final class ChessAssistantPatch {
         }
     }
 
+    private static void collectCandidatePayload(JSONObject json, boolean whiteToMove,
+                                                 ArrayList<CandidateMove> found) {
+        CandidateMove primary = parseCandidate(json, whiteToMove);
+        if (primary != null) addOrUpdateCandidate(found, primary);
+
+        String[] arrayKeys = {"variants", "moves", "lines", "pvs"};
+        for (String key : arrayKeys) {
+            JSONArray array = json.optJSONArray(key);
+            if (array == null) continue;
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item == null) continue;
+                CandidateMove candidate = parseCandidate(item, whiteToMove);
+                if (candidate != null) addOrUpdateCandidate(found, candidate);
+            }
+        }
+    }
+
     private static void addOrUpdateCandidate(ArrayList<CandidateMove> candidates, CandidateMove incoming) {
         for (int i = 0; i < candidates.size(); i++) {
             CandidateMove current = candidates.get(i);
             if (current.move.equalsIgnoreCase(incoming.move)) {
-                if (incoming.depth >= current.depth || "bestmove".equalsIgnoreCase(incoming.label)) {
-                    candidates.set(i, incoming);
-                }
+                if (incoming.depth >= current.depth) candidates.set(i, incoming);
                 return;
             }
         }
@@ -759,6 +776,38 @@ public final class ChessAssistantPatch {
                 return new String(message.toByteArray(), StandardCharsets.UTF_8);
             }
         }
+    }
+
+    private static CandidateMove parseCandidate(JSONObject json, boolean whiteToMove) {
+        String move = json.optString("move", "").trim();
+        if (!isUciMove(move)) move = json.optString("lan", "").trim();
+        if (!isUciMove(move)) move = json.optString("uci", "").trim();
+        if (!isUciMove(move)) move = json.optString("bestmove", "").trim();
+        if (!isUciMove(move)) {
+            String from = json.optString("from", "").trim();
+            String to = json.optString("to", "").trim();
+            if (from.matches("(?i)^[a-h][1-8]$") && to.matches("(?i)^[a-h][1-8]$")) {
+                move = from + to;
+                String promotion = json.optString("promotion", "").trim();
+                if (promotion.matches("(?i)^[qrbn]$")) move += promotion;
+            }
+        }
+        if (!isUciMove(move)) return null;
+        move = move.toLowerCase(java.util.Locale.US);
+
+        double evaluation = json.optDouble("eval", Double.NaN);
+        if (Double.isNaN(evaluation)) {
+            String centipawns = json.optString("centipawns", "");
+            try {
+                evaluation = Double.parseDouble(centipawns) / 100.0;
+            } catch (NumberFormatException ignored) {
+                evaluation = 0.0;
+            }
+        }
+
+        int mate = json.isNull("mate") ? 0 : json.optInt("mate", 0);
+        int depth = json.optInt("depth", ENGINE_DEPTH);
+        return new CandidateMove(move, evaluation, mate, depth, whiteToMove, "");
     }
 
     private static boolean isUciMove(String move) {
