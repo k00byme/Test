@@ -52,6 +52,7 @@ public final class ChessAssistantPatch {
     private static final String BOARD_CLASS_V2 = "com.chess.chessboard.v2.ChessBoardView";
     private static final String BOARD_CLASS_V1 = "com.chess.chessboard.view.ChessBoardView";
     private static final String CHESS_API_URL = "https://chess-api.com/v1";
+    private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
     private static final int ENGINE_DEPTH = 12;
     private static final int ENGINE_VARIANTS = 5;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
