@@ -27,7 +27,7 @@ jobs:
         run: |
           git remote add source "https://github.com/${SOURCE_REPOSITORY}.git"
           git fetch --no-tags source "refs/heads/${SOURCE_BRANCH}:refs/remotes/source/${SOURCE_BRANCH}"
-          git switch --orphan mirror-copy "refs/remotes/source/${SOURCE_BRANCH}"
+          git checkout --orphan mirror-copy "refs/remotes/source/${SOURCE_BRANCH}"
           git rm -r .github/workflows
           git -c user.name="Repository mirror" -c user.email="actions@users.noreply.github.com" commit -m "Copy Chess Assistant repository snapshot"
           git push origin "HEAD:refs/heads/${DESTINATION_BRANCH}" --force
