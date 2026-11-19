@@ -28,6 +28,7 @@ import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -1100,7 +1101,7 @@ public final class ChessAssistantPatch {
             RectF box = new RectF(x, y, x + boxWidth, y + boxHeight);
             badgeBackgroundPaint.setColor(0xE820242B);
             badgeStrokePaint.setColor(color);
-            badgeStrokePaint.setStrokeWidth(dp(getContext(), 1.5f));
+            badgeStrokePaint.setStrokeWidth(dpFloat(getContext(), 1.5f));
             canvas.drawRoundRect(box, dp(getContext(), 6), dp(getContext(), 6), badgeBackgroundPaint);
             canvas.drawRoundRect(box, dp(getContext(), 6), dp(getContext(), 6), badgeStrokePaint);
             canvas.drawText(text, x + paddingX, y + paddingY + badgeTextPaint.getTextSize() * 0.82f,
@@ -1110,5 +1111,9 @@ public final class ChessAssistantPatch {
 
     private static int dp(Context context, int value) {
         return Math.round(value * context.getResources().getDisplayMetrics().density);
+    }
+
+    private static float dpFloat(Context context, float value) {
+        return value * context.getResources().getDisplayMetrics().density;
     }
 }
