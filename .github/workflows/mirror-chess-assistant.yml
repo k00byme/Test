@@ -14,20 +14,24 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout destination
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Fetch source and copy complete working tree
+      - name: Fetch source into an isolated Git repository
         env:
           SOURCE_REPOSITORY: k00byme/Revangetest
           SOURCE_BRANCH: morphe-chess-assistant
           DESTINATION_BRANCH: chess-assistant-mirror
+          DESTINATION_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/chess-assistant-mirror"
+          cd "$RUNNER_TEMP/chess-assistant-mirror"
+          git init
           git remote add source "https://github.com/${SOURCE_REPOSITORY}.git"
-          git fetch --no-tags source "refs/heads/${SOURCE_BRANCH}:refs/remotes/source/${SOURCE_BRANCH}"
-          git checkout --orphan mirror-copy "refs/remotes/source/${SOURCE_BRANCH}"
+          git fetch --no-tags source "refs/heads/${SOURCE_BRANCH}"
+          git checkout --orphan mirror-copy FETCH_HEAD
           git rm -r .github/workflows
-          git -c user.name="Repository mirror" -c user.email="actions@users.noreply.github.com" commit -m "Copy Chess Assistant repository snapshot"
-          git push origin "HEAD:refs/heads/${DESTINATION_BRANCH}" --force
+          git config user.name "Repository mirror"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "Copy Chess Assistant repository snapshot"
+          git remote add destination "https://x-access-token:${GITHUB_TOKEN}@github.com/${DESTINATION_REPOSITORY}.git"
+          git push destination "HEAD:refs/heads/${DESTINATION_BRANCH}" --force
