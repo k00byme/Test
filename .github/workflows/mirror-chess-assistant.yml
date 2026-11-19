@@ -1,0 +1,30 @@
+name: Mirror Chess Assistant
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/mirror-chess-assistant.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch complete source history and push mirror branch
+        env:
+          SOURCE_REPOSITORY: k00byme/Revangetest
+          SOURCE_BRANCH: morphe-chess-assistant
+          DESTINATION_BRANCH: chess-assistant-mirror
+        run: |
+          git remote add source "https://github.com/${SOURCE_REPOSITORY}.git"
+          git fetch --no-tags source "refs/heads/${SOURCE_BRANCH}:refs/remotes/source/${SOURCE_BRANCH}"
+          git push origin "refs/remotes/source/${SOURCE_BRANCH}:refs/heads/${DESTINATION_BRANCH}" --force
