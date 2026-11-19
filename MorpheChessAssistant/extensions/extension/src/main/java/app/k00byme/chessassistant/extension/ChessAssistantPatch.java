@@ -15,13 +15,16 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -29,6 +32,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -45,8 +51,10 @@ public final class ChessAssistantPatch {
     private static final String TAG = "morphe.chess.assistant.analysis";
     private static final String BOARD_CLASS_V2 = "com.chess.chessboard.v2.ChessBoardView";
     private static final String BOARD_CLASS_V1 = "com.chess.chessboard.view.ChessBoardView";
-    private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
+    private static final String CHESS_API_URL = "https://chess-api.com/v1";
     private static final int ENGINE_DEPTH = 12;
+    private static final int ENGINE_VARIANTS = 5;
+    private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private ChessAssistantPatch() {}
@@ -85,13 +93,12 @@ public final class ChessAssistantPatch {
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final TextView panel;
+        private final LinearLayout candidatePanel;
         private final BoardDrawing drawing;
         private final Runnable poller = new Runnable() {
             @Override public void run() {
                 scanAndAnalyze();
-                if (isAttachedToWindow()) {
-                    handler.postDelayed(this, 1200L);
-                }
+                if (isAttachedToWindow()) handler.postDelayed(this, 1200L);
             }
         };
 
@@ -100,9 +107,9 @@ public final class ChessAssistantPatch {
         private String requestedFen = "";
         private String activeFen = "";
         private String bestMove = "";
-        private String status = "Procurando o tabuleiro…";
         private double evaluation = 0.0;
         private int mate = 0;
+        private CandidateMove[] candidates = new CandidateMove[0];
         private View boardView;
 
         AnalysisOverlay(Activity activity) {
@@ -121,7 +128,7 @@ public final class ChessAssistantPatch {
             ));
 
             panel = new TextView(activity);
-            panel.setText(status);
+            panel.setText("Procurando o tabuleiro…");
             panel.setTextColor(0xFFFFFFFF);
             panel.setTextSize(12.5f);
             panel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -144,6 +151,21 @@ public final class ChessAssistantPatch {
             panelParams.topMargin = margin;
             panelParams.rightMargin = margin;
             addView(panel, panelParams);
+
+            candidatePanel = new LinearLayout(activity);
+            candidatePanel.setOrientation(LinearLayout.VERTICAL);
+            candidatePanel.setGravity(Gravity.END);
+            candidatePanel.setClickable(false);
+            candidatePanel.setFocusable(false);
+            candidatePanel.setVisibility(GONE);
+
+            FrameLayout.LayoutParams candidateParams = new FrameLayout.LayoutParams(
+                    LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM | Gravity.END
+            );
+            candidateParams.bottomMargin = dp(activity, 12);
+            candidateParams.rightMargin = dp(activity, 10);
+            addView(candidatePanel, candidateParams);
         }
 
         @Override protected void onAttachedToWindow() {
@@ -169,11 +191,8 @@ public final class ChessAssistantPatch {
                 boardView = null;
                 activeFen = "";
                 requestedFen = "";
-                bestMove = "";
-                evaluation = 0.0;
-                mate = 0;
+                clearAnalysis();
                 drawing.setBoard(null);
-                drawing.setEngine("", 0.0, 0, false);
                 setStatus("Aguardando o tabuleiro do jogo…");
                 return;
             }
@@ -183,11 +202,8 @@ public final class ChessAssistantPatch {
             if (!isFen(fen)) {
                 activeFen = "";
                 requestedFen = "";
-                bestMove = "";
-                evaluation = 0.0;
-                mate = 0;
+                clearAnalysis();
                 drawing.setBoard(found);
-                drawing.setEngine("", 0.0, 0, isBoardFlipped(found));
                 setStatus("Aguardando uma posição válida do tabuleiro…");
                 return;
             }
@@ -195,25 +211,29 @@ public final class ChessAssistantPatch {
             drawing.setBoard(found);
             if (!fen.equals(activeFen)) {
                 activeFen = fen;
-                bestMove = "";
-                evaluation = 0.0;
-                mate = 0;
-                drawing.setEngine("", 0.0, 0, isBoardFlipped(found));
+                clearAnalysis();
             }
 
-            if (!fen.equals(requestedFen) && !requestInFlight) {
-                requestAnalysis(fen);
-            }
-            drawing.setEngine(bestMove, evaluation, mate, isBoardFlipped(found));
+            if (!fen.equals(requestedFen) && !requestInFlight) requestAnalysis(fen);
+            drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(found));
+        }
+
+        private void clearAnalysis() {
+            bestMove = "";
+            evaluation = 0.0;
+            mate = 0;
+            candidates = new CandidateMove[0];
+            drawing.setEngine(candidates, evaluation, mate, boardView != null && isBoardFlipped(boardView));
+            showCandidateBadges(candidates);
         }
 
         private void requestAnalysis(final String fen) {
             requestedFen = fen;
             requestInFlight = true;
-            setStatus("Stockfish analisando…");
+            setStatus("Stockfish analisando cinco alternativas…");
             try {
                 worker.execute(() -> {
-                    EngineResult result = fetchStockfish(fen);
+                    EngineResult result = fetchAnalysis(fen);
                     MAIN.post(() -> {
                         requestInFlight = false;
                         if (closed || !isAttachedToWindow()) return;
@@ -221,37 +241,77 @@ public final class ChessAssistantPatch {
                         // A newer position may have arrived while the previous request was running.
                         if (!fen.equals(activeFen)) {
                             String newestFen = activeFen;
-                            if (isFen(newestFen) && !newestFen.equals(requestedFen)) {
-                                requestAnalysis(newestFen);
-                            }
+                            if (isFen(newestFen) && !newestFen.equals(requestedFen)) requestAnalysis(newestFen);
                             return;
                         }
 
                         if (result.error != null) {
-                            setStatus("Stockfish indisponível (precisa de internet): " + result.error);
-                            bestMove = "";
-                            evaluation = 0.0;
-                            mate = 0;
-                            drawing.setEngine("", 0.0, 0, isBoardFlipped(boardView));
+                            clearAnalysis();
+                            setStatus("Análise indisponível: " + result.error);
                             return;
                         }
 
                         bestMove = result.bestMove;
                         evaluation = result.evaluation;
                         mate = result.mate;
+                        candidates = result.candidates == null ? new CandidateMove[0] : result.candidates;
+                        showCandidateBadges(candidates);
+
                         String evalText = result.mate != 0
                                 ? "Mate em " + result.mate
                                 : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
-                        setStatus("STOCKFISH  •  profundidade " + ENGINE_DEPTH
+                        String mode = candidates.length >= 3 ? "3 opções" : candidates.length + " opção(ões)";
+                        setStatus("STOCKFISH 18  •  profundidade " + ENGINE_DEPTH
                                 + "\nAvaliação: " + evalText
-                                + "\nMelhor lance: " + (bestMove.isEmpty() ? "indisponível" : bestMove));
-                        drawing.setEngine(bestMove, evaluation, mate, isBoardFlipped(boardView));
+                                + "\n" + mode);
+                        drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(boardView));
                     });
                 });
             } catch (RuntimeException ex) {
                 requestInFlight = false;
                 setStatus("Não foi possível iniciar a análise.");
             }
+        }
+
+        private void showCandidateBadges(CandidateMove[] values) {
+            candidatePanel.removeAllViews();
+            if (values == null || values.length == 0 || closed) {
+                candidatePanel.setVisibility(GONE);
+                return;
+            }
+
+            int[] colors = BoardDrawing.MOVE_COLORS;
+            for (int i = 0; i < values.length; i++) {
+                CandidateMove candidate = values[i];
+                TextView badge = new TextView(getContext());
+                String moveText = candidate.move.substring(0, 2) + " → " + candidate.move.substring(2, 4);
+                if (candidate.move.length() > 4) moveText += "=" + Character.toUpperCase(candidate.move.charAt(4));
+                String scoreText = candidate.mate != 0
+                        ? (candidate.mate > 0 ? "M+" + candidate.mate : "M" + candidate.mate)
+                        : String.format(java.util.Locale.US, "%+.2f", candidate.evaluation);
+                badge.setText(candidate.label + "  ·  " + moveText + "  ·  " + scoreText);
+                badge.setTextColor(0xFFFFFFFF);
+                badge.setTextSize(11.5f);
+                badge.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                badge.setPadding(dp(getContext(), 10), dp(getContext(), 7),
+                        dp(getContext(), 10), dp(getContext(), 7));
+
+                GradientDrawable chip = new GradientDrawable();
+                chip.setColor(0xE820242B);
+                chip.setCornerRadius(dp(getContext(), 10));
+                chip.setStroke(dp(getContext(), 2), colors[Math.min(i, colors.length - 1)]);
+                badge.setBackground(chip);
+                badge.setElevation(dp(getContext(), 5));
+                badge.setClickable(false);
+                badge.setFocusable(false);
+
+                LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT
+                );
+                if (i > 0) badgeParams.topMargin = dp(getContext(), 5);
+                candidatePanel.addView(badge, badgeParams);
+            }
+            candidatePanel.setVisibility(VISIBLE);
         }
 
         private void setStatus(String value) {
@@ -418,6 +478,157 @@ public final class ChessAssistantPatch {
                 && fields[5].matches("\\d+");
     }
 
+    private static EngineResult fetchAnalysis(String fen) {
+        EngineResult multiPv = fetchChessApi(fen);
+        if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
+
+        // Keep the previous service as a fallback so the original best-move feature
+        // remains available when the MultiPV provider is temporarily unreachable.
+        EngineResult fallback = fetchStockfish(fen);
+        if (fallback.error == null && !fallback.bestMove.isEmpty()) {
+            boolean whiteToMove = fen.split("\\s+")[1].equals("w");
+            CandidateMove single = new CandidateMove(
+                    fallback.bestMove, fallback.evaluation, fallback.mate,
+                    ENGINE_DEPTH, whiteToMove, "MELHOR"
+            );
+            return new EngineResult(fallback.bestMove, fallback.evaluation, fallback.mate,
+                    null, new CandidateMove[]{single});
+        }
+        String primaryError = multiPv.error == null ? "nenhuma variação recebida" : multiPv.error;
+        String fallbackError = fallback.error == null ? "sem melhor jogada" : fallback.error;
+        return EngineResult.error(primaryError + " (reserva: " + fallbackError + ")");
+    }
+
+    private static EngineResult fetchChessApi(String fen) {
+        HttpURLConnection connection = null;
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("fen", fen);
+            payload.put("depth", ENGINE_DEPTH);
+            payload.put("maxThinkingTime", ENGINE_MAX_THINKING_TIME_MS);
+            payload.put("variants", ENGINE_VARIANTS);
+
+            connection = (HttpURLConnection) new URL(CHESS_API_URL).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setConnectTimeout(8000);
+            connection.setReadTimeout(15000);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/1.1");
+
+            byte[] requestBody = payload.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(requestBody.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(requestBody);
+                output.flush();
+            }
+
+            int code = connection.getResponseCode();
+            InputStream stream = code >= 200 && code < 300
+                    ? connection.getInputStream() : connection.getErrorStream();
+            if (stream == null) return EngineResult.error("HTTP " + code);
+
+            StringBuilder body = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) body.append(line);
+            }
+            if (code < 200 || code >= 300) return EngineResult.error("chess-api HTTP " + code);
+
+            JSONObject json = new JSONObject(body.toString());
+            if ("error".equalsIgnoreCase(json.optString("type", ""))) {
+                return EngineResult.error(json.optString("text", "erro retornado pelo serviço"));
+            }
+
+            boolean whiteToMove = fen.split("\\s+")[1].equals("w");
+            ArrayList<CandidateMove> found = new ArrayList<>();
+
+            CandidateMove primary = parseCandidate(json, whiteToMove);
+            if (primary != null) found.add(primary);
+
+            JSONArray variants = json.optJSONArray("variants");
+            if (variants != null) {
+                for (int i = 0; i < variants.length(); i++) {
+                    JSONObject item = variants.optJSONObject(i);
+                    if (item == null) continue;
+                    CandidateMove candidate = parseCandidate(item, whiteToMove);
+                    if (candidate == null) continue;
+
+                    boolean duplicate = false;
+                    for (CandidateMove current : found) {
+                        if (current.move.equals(candidate.move)) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!duplicate) found.add(candidate);
+                }
+            }
+
+            if (found.isEmpty()) {
+                return EngineResult.error(json.optString("text", "o serviço não retornou jogadas"));
+            }
+
+            Collections.sort(found, (left, right) ->
+                    Double.compare(right.scoreForMover(), left.scoreForMover()));
+
+            ArrayList<CandidateMove> selected = new ArrayList<>();
+            CandidateMove best = found.get(0);
+            selected.add(best.withLabel("MELHOR"));
+
+            if (found.size() > 1) {
+                CandidateMove good = found.get(1);
+                double loss = best.scoreForMover() - good.scoreForMover();
+                selected.add(good.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+            }
+
+            if (found.size() > 2) {
+                CandidateMove lessFavorable = found.get(found.size() - 1);
+                double loss = best.scoreForMover() - lessFavorable.scoreForMover();
+                boolean clearlyBad = loss >= 1.20
+                        || (lessFavorable.mate != 0
+                        && (whiteToMove ? lessFavorable.mate < 0 : lessFavorable.mate > 0));
+                selected.add(lessFavorable.withLabel(clearlyBad ? "RUIM" : "MENOS BOA"));
+            }
+
+            CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
+            return new EngineResult(best.move, best.evaluation, best.mate, null, candidates);
+        } catch (Exception ex) {
+            String message = ex.getMessage();
+            if (message == null || message.trim().isEmpty()) message = "falha na análise MultiPV";
+            if (message.length() > 90) message = message.substring(0, 90);
+            return EngineResult.error(message);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static CandidateMove parseCandidate(JSONObject json, boolean whiteToMove) {
+        String move = json.optString("move", "").trim();
+        if (!isUciMove(move)) move = json.optString("lan", "").trim();
+        if (!isUciMove(move)) return null;
+
+        double evaluation = json.optDouble("eval", Double.NaN);
+        if (Double.isNaN(evaluation)) {
+            String centipawns = json.optString("centipawns", "");
+            try {
+                evaluation = Double.parseDouble(centipawns) / 100.0;
+            } catch (NumberFormatException ignored) {
+                evaluation = 0.0;
+            }
+        }
+
+        int mate = json.isNull("mate") ? 0 : json.optInt("mate", 0);
+        int depth = json.optInt("depth", ENGINE_DEPTH);
+        return new CandidateMove(move, evaluation, mate, depth, whiteToMove, "");
+    }
+
+    private static boolean isUciMove(String move) {
+        return move != null && move.matches("(?i)^[a-h][1-8][a-h][1-8][qrbn]?$");
+    }
+
     private static EngineResult fetchStockfish(String fen) {
         HttpURLConnection connection = null;
         try {
@@ -471,38 +682,80 @@ public final class ChessAssistantPatch {
         }
     }
 
+    private static final class CandidateMove {
+        final String move;
+        final double evaluation;
+        final int mate;
+        final int depth;
+        final boolean whiteToMove;
+        final String label;
+
+        CandidateMove(String move, double evaluation, int mate, int depth,
+                      boolean whiteToMove, String label) {
+            this.move = move;
+            this.evaluation = evaluation;
+            this.mate = mate;
+            this.depth = depth;
+            this.whiteToMove = whiteToMove;
+            this.label = label;
+        }
+
+        double scoreForMover() {
+            if (mate != 0) {
+                boolean moverIsMating = whiteToMove ? mate > 0 : mate < 0;
+                return moverIsMating ? 1000.0 - Math.abs(mate) : -1000.0 + Math.abs(mate);
+            }
+            return whiteToMove ? evaluation : -evaluation;
+        }
+
+        CandidateMove withLabel(String value) {
+            return new CandidateMove(move, evaluation, mate, depth, whiteToMove, value);
+        }
+    }
+
     private static final class EngineResult {
         final String bestMove;
         final double evaluation;
         final int mate;
         final String error;
+        final CandidateMove[] candidates;
 
         EngineResult(String bestMove, double evaluation, int mate, String error) {
+            this(bestMove, evaluation, mate, error, new CandidateMove[0]);
+        }
+
+        EngineResult(String bestMove, double evaluation, int mate, String error,
+                     CandidateMove[] candidates) {
             this.bestMove = bestMove;
             this.evaluation = evaluation;
             this.mate = mate;
             this.error = error;
+            this.candidates = candidates == null ? new CandidateMove[0] : candidates;
         }
 
         static EngineResult error(String error) {
-            return new EngineResult("", 0.0, 0, error);
+            return new EngineResult("", 0.0, 0, error, new CandidateMove[0]);
         }
     }
 
     private static final class BoardDrawing extends View {
+        static final int[] MOVE_COLORS = {
+                0xFF37D69A, // Best
+                0xFFFFC857, // Good / medium
+                0xFFF07878  // Least favorable
+        };
+
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fromSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint toSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final WeakReference<Context> contextRef;
         private View board;
-        private String bestMove = "";
+        private CandidateMove[] candidates = new CandidateMove[0];
         private double evaluation = 0.0;
         private int mate = 0;
         private boolean flipped;
 
         BoardDrawing(Context context) {
             super(context);
-            contextRef = new WeakReference<>(context);
             setWillNotDraw(false);
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         }
@@ -512,8 +765,8 @@ public final class ChessAssistantPatch {
             invalidate();
         }
 
-        void setEngine(String move, double eval, int mateIn, boolean isFlipped) {
-            bestMove = move == null ? "" : move;
+        void setEngine(CandidateMove[] moves, double eval, int mateIn, boolean isFlipped) {
+            candidates = moves == null ? new CandidateMove[0] : moves;
             evaluation = eval;
             mate = mateIn;
             flipped = isFlipped;
@@ -553,49 +806,63 @@ public final class ChessAssistantPatch {
                     left - barGap, top + size * (1.0f - normalized),
                     dp(getContext(), 2), dp(getContext(), 2), paint);
 
-            if (bestMove.length() < 4) return;
-            int fromFile = bestMove.charAt(0) - 'a';
-            int fromRank = bestMove.charAt(1) - '1';
-            int toFile = bestMove.charAt(2) - 'a';
-            int toRank = bestMove.charAt(3) - '1';
-            if (fromFile < 0 || fromFile > 7 || toFile < 0 || toFile > 7
-                    || fromRank < 0 || fromRank > 7 || toRank < 0 || toRank > 7) return;
+            if (candidates.length == 0) return;
+
+            // Draw weaker alternatives first so the best move remains visually on top.
+            for (int i = candidates.length - 1; i >= 0; i--) {
+                drawCandidate(canvas, candidates[i], i, left, top, square);
+            }
+        }
+
+        private void drawCandidate(Canvas canvas, CandidateMove candidate, int index,
+                                   float left, float top, float square) {
+            String move = candidate.move;
+            if (!isUciMove(move)) return;
+
+            int fromFile = move.charAt(0) - 'a';
+            int fromRank = move.charAt(1) - '1';
+            int toFile = move.charAt(2) - 'a';
+            int toRank = move.charAt(3) - '1';
 
             int fromColumn = flipped ? 7 - fromFile : fromFile;
             int fromRow = flipped ? fromRank : 7 - fromRank;
             int toColumn = flipped ? 7 - toFile : toFile;
             int toRow = flipped ? toRank : 7 - toRank;
 
-            // Distinct translucent highlights identify the piece to move and its destination.
-            fromSquarePaint.setColor(0x6638BDF8);
-            toSquarePaint.setColor(0x8864DD7F);
-            float inset = square * 0.055f;
-            canvas.drawRoundRect(
-                    new RectF(left + fromColumn * square + inset,
-                            top + fromRow * square + inset,
-                            left + (fromColumn + 1) * square - inset,
-                            top + (fromRow + 1) * square - inset),
-                    square * 0.09f, square * 0.09f, fromSquarePaint);
-            canvas.drawRoundRect(
-                    new RectF(left + toColumn * square + inset,
-                            top + toRow * square + inset,
-                            left + (toColumn + 1) * square - inset,
-                            top + (toRow + 1) * square - inset),
-                    square * 0.09f, square * 0.09f, toSquarePaint);
-
             float startX = left + (fromColumn + 0.5f) * square;
             float startY = top + (fromRow + 0.5f) * square;
             float endX = left + (toColumn + 0.5f) * square;
             float endY = top + (toRow + 0.5f) * square;
 
-            paint.setColor(0xE6F4C542);
+            if (index == 0) {
+                float inset = square * 0.055f;
+                fromSquarePaint.setColor(0x6638BDF8);
+                toSquarePaint.setColor(0x8864DD7F);
+                canvas.drawRoundRect(
+                        new RectF(left + fromColumn * square + inset,
+                                top + fromRow * square + inset,
+                                left + (fromColumn + 1) * square - inset,
+                                top + (fromRow + 1) * square - inset),
+                        square * 0.09f, square * 0.09f, fromSquarePaint);
+                canvas.drawRoundRect(
+                        new RectF(left + toColumn * square + inset,
+                                top + toRow * square + inset,
+                                left + (toColumn + 1) * square - inset,
+                                top + (toRow + 1) * square - inset),
+                        square * 0.09f, square * 0.09f, toSquarePaint);
+            }
+
+            int color = MOVE_COLORS[Math.min(index, MOVE_COLORS.length - 1)];
+            paint.setColor(color);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(Math.max(dp(getContext(), 3), square * 0.075f));
+            paint.setStrokeWidth(index == 0
+                    ? Math.max(dp(getContext(), 3), square * 0.075f)
+                    : Math.max(dp(getContext(), 2), square * 0.045f));
             paint.setStrokeCap(Paint.Cap.ROUND);
             canvas.drawLine(startX, startY, endX, endY, paint);
 
             float angle = (float) Math.atan2(endY - startY, endX - startX);
-            float head = square * 0.28f;
+            float head = square * (index == 0 ? 0.28f : 0.20f);
             Path arrowHead = new Path();
             arrowHead.moveTo(endX, endY);
             arrowHead.lineTo(
