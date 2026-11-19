@@ -937,12 +937,12 @@ public final class ChessAssistantPatch {
 
             // Weaker alternatives are painted first; the best move remains on top.
             for (int i = candidates.length - 1; i >= 0; i--) {
-                drawCandidate(canvas, candidates[i], i, left, top, size, square);
+                drawCandidate(canvas, candidates[i], i, left, top, square);
             }
         }
 
         private void drawCandidate(Canvas canvas, CandidateMove candidate, int index,
-                                   float left, float top, float boardSize, float square) {
+                                   float left, float top, float square) {
             String move = candidate.move;
             if (!isUciMove(move)) return;
 
@@ -1003,7 +1003,6 @@ public final class ChessAssistantPatch {
             paint.setStyle(Paint.Style.FILL);
             canvas.drawPath(arrowHead, paint);
 
-            // A separate on-board text balloon identifies every arrow, not just the list entry.
         }
 
     }
