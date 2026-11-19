@@ -16,7 +16,6 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -108,7 +107,6 @@ public final class ChessAssistantPatch {
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final TextView panel;
-        private final LinearLayout candidatePanel;
         private final BoardDrawing drawing;
         private final Runnable poller = new Runnable() {
             @Override public void run() {
@@ -167,20 +165,6 @@ public final class ChessAssistantPatch {
             panelParams.rightMargin = margin;
             addView(panel, panelParams);
 
-            candidatePanel = new LinearLayout(activity);
-            candidatePanel.setOrientation(LinearLayout.VERTICAL);
-            candidatePanel.setGravity(Gravity.END);
-            candidatePanel.setClickable(false);
-            candidatePanel.setFocusable(false);
-            candidatePanel.setVisibility(GONE);
-
-            FrameLayout.LayoutParams candidateParams = new FrameLayout.LayoutParams(
-                    LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM | Gravity.END
-            );
-            candidateParams.bottomMargin = dp(activity, 12);
-            candidateParams.rightMargin = dp(activity, 10);
-            addView(candidatePanel, candidateParams);
         }
 
         @Override protected void onAttachedToWindow() {
@@ -239,7 +223,6 @@ public final class ChessAssistantPatch {
             mate = 0;
             candidates = new CandidateMove[0];
             drawing.setEngine(candidates, evaluation, mate, boardView != null && isBoardFlipped(boardView));
-            showCandidateBadges(candidates);
         }
 
         private void requestAnalysis(final String fen) {
@@ -270,7 +253,6 @@ public final class ChessAssistantPatch {
                         evaluation = result.evaluation;
                         mate = result.mate;
                         candidates = result.candidates == null ? new CandidateMove[0] : result.candidates;
-                        showCandidateBadges(candidates);
 
                         String evalText = result.mate != 0
                                 ? "Mate em " + result.mate
@@ -286,47 +268,6 @@ public final class ChessAssistantPatch {
                 requestInFlight = false;
                 setStatus("Não foi possível iniciar a análise.");
             }
-        }
-
-        private void showCandidateBadges(CandidateMove[] values) {
-            candidatePanel.removeAllViews();
-            if (values == null || values.length == 0 || closed) {
-                candidatePanel.setVisibility(GONE);
-                return;
-            }
-
-            int[] colors = BoardDrawing.MOVE_COLORS;
-            for (int i = 0; i < values.length; i++) {
-                CandidateMove candidate = values[i];
-                TextView badge = new TextView(getContext());
-                String moveText = candidate.move.substring(0, 2) + " → " + candidate.move.substring(2, 4);
-                if (candidate.move.length() > 4) moveText += "=" + Character.toUpperCase(candidate.move.charAt(4));
-                String scoreText = candidate.mate != 0
-                        ? (candidate.mate > 0 ? "M+" + candidate.mate : "M" + candidate.mate)
-                        : String.format(java.util.Locale.US, "%+.2f", candidate.evaluation);
-                badge.setText(candidate.label + "  ·  " + moveText + "  ·  " + scoreText);
-                badge.setTextColor(0xFFFFFFFF);
-                badge.setTextSize(11.5f);
-                badge.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-                badge.setPadding(dp(getContext(), 10), dp(getContext(), 7),
-                        dp(getContext(), 10), dp(getContext(), 7));
-
-                GradientDrawable chip = new GradientDrawable();
-                chip.setColor(0xE820242B);
-                chip.setCornerRadius(dp(getContext(), 10));
-                chip.setStroke(dp(getContext(), 2), colors[Math.min(i, colors.length - 1)]);
-                badge.setBackground(chip);
-                badge.setElevation(dp(getContext(), 5));
-                badge.setClickable(false);
-                badge.setFocusable(false);
-
-                LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
-                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT
-                );
-                if (i > 0) badgeParams.topMargin = dp(getContext(), 5);
-                candidatePanel.addView(badge, badgeParams);
-            }
-            candidatePanel.setVisibility(VISIBLE);
         }
 
         private void setStatus(String value) {
@@ -934,9 +875,6 @@ public final class ChessAssistantPatch {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fromSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint toSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint badgeBackgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint badgeStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint badgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private View board;
         private CandidateMove[] candidates = new CandidateMove[0];
         private double evaluation = 0.0;
@@ -947,12 +885,6 @@ public final class ChessAssistantPatch {
             super(context);
             setWillNotDraw(false);
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-            badgeBackgroundPaint.setColor(0xE820242B);
-            badgeBackgroundPaint.setStyle(Paint.Style.FILL);
-            badgeStrokePaint.setStyle(Paint.Style.STROKE);
-            badgeTextPaint.setColor(0xFFFFFFFF);
-            badgeTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            badgeTextPaint.setTextSize(dp(context, 10));
         }
 
         void setBoard(View value) {
@@ -1029,25 +961,24 @@ public final class ChessAssistantPatch {
             float endX = left + (toColumn + 0.5f) * square;
             float endY = top + (toRow + 0.5f) * square;
 
-            if (index == 0) {
-                float inset = square * 0.055f;
-                fromSquarePaint.setColor(0x6638BDF8);
-                toSquarePaint.setColor(0x8864DD7F);
-                canvas.drawRoundRect(
-                        new RectF(left + fromColumn * square + inset,
-                                top + fromRow * square + inset,
-                                left + (fromColumn + 1) * square - inset,
-                                top + (fromRow + 1) * square - inset),
-                        square * 0.09f, square * 0.09f, fromSquarePaint);
-                canvas.drawRoundRect(
-                        new RectF(left + toColumn * square + inset,
-                                top + toRow * square + inset,
-                                left + (toColumn + 1) * square - inset,
-                                top + (toRow + 1) * square - inset),
-                        square * 0.09f, square * 0.09f, toSquarePaint);
-            }
-
             int color = MOVE_COLORS[Math.min(index, MOVE_COLORS.length - 1)];
+
+            // Highlight every suggested move: origin in blue, destination in that move's arrow color.
+            float inset = square * 0.055f;
+            fromSquarePaint.setColor(0x6638BDF8);
+            toSquarePaint.setColor((color & 0x00FFFFFF) | 0x88000000);
+            canvas.drawRoundRect(
+                    new RectF(left + fromColumn * square + inset,
+                            top + fromRow * square + inset,
+                            left + (fromColumn + 1) * square - inset,
+                            top + (fromRow + 1) * square - inset),
+                    square * 0.09f, square * 0.09f, fromSquarePaint);
+            canvas.drawRoundRect(
+                    new RectF(left + toColumn * square + inset,
+                            top + toRow * square + inset,
+                            left + (toColumn + 1) * square - inset,
+                            top + (toRow + 1) * square - inset),
+                    square * 0.09f, square * 0.09f, toSquarePaint);
             paint.setColor(color);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(index == 0
@@ -1073,47 +1004,12 @@ public final class ChessAssistantPatch {
             canvas.drawPath(arrowHead, paint);
 
             // A separate on-board text balloon identifies every arrow, not just the list entry.
-            drawMoveBadge(canvas, candidate, index, color, endX, endY, left, top, boardSize);
         }
 
-        private void drawMoveBadge(Canvas canvas, CandidateMove candidate, int index, int color,
-                                   float endX, float endY, float boardLeft, float boardTop,
-                                   float boardSize) {
-            String fromTo = candidate.move.substring(0, 2) + "→" + candidate.move.substring(2, 4);
-            String text = candidate.label + " " + fromTo;
-            if (candidate.move.length() > 4) text += "=" + Character.toUpperCase(candidate.move.charAt(4));
-
-            float paddingX = dp(getContext(), 5);
-            float paddingY = dp(getContext(), 3);
-            float textWidth = badgeTextPaint.measureText(text);
-            float boxWidth = textWidth + paddingX * 2;
-            float boxHeight = badgeTextPaint.getTextSize() + paddingY * 2;
-            float gap = dp(getContext(), 3);
-
-            float x = endX + gap;
-            if (x + boxWidth > boardLeft + boardSize) x = endX - boxWidth - gap;
-            x = Math.max(boardLeft + gap, Math.min(x, boardLeft + boardSize - boxWidth - gap));
-
-            float verticalOffset = (index - 1) * (boxHeight + dp(getContext(), 3));
-            float y = endY - boxHeight / 2f + verticalOffset;
-            y = Math.max(boardTop + gap, Math.min(y, boardTop + boardSize - boxHeight - gap));
-
-            RectF box = new RectF(x, y, x + boxWidth, y + boxHeight);
-            badgeBackgroundPaint.setColor(0xE820242B);
-            badgeStrokePaint.setColor(color);
-            badgeStrokePaint.setStrokeWidth(dpFloat(getContext(), 1.5f));
-            canvas.drawRoundRect(box, dp(getContext(), 6), dp(getContext(), 6), badgeBackgroundPaint);
-            canvas.drawRoundRect(box, dp(getContext(), 6), dp(getContext(), 6), badgeStrokePaint);
-            canvas.drawText(text, x + paddingX, y + paddingY + badgeTextPaint.getTextSize() * 0.82f,
-                    badgeTextPaint);
-        }
     }
 
     private static int dp(Context context, int value) {
         return Math.round(value * context.getResources().getDisplayMetrics().density);
     }
 
-    private static float dpFloat(Context context, float value) {
-        return value * context.getResources().getDisplayMetrics().density;
-    }
 }
