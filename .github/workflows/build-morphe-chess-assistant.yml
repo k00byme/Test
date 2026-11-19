@@ -3,7 +3,7 @@ name: Build Morphe Chess Assistant
 on:
   push:
     branches:
-      - morphe-chess-assistant
+      - chess-assistant-mirror
   workflow_dispatch:
 
 permissions:
