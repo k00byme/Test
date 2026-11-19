@@ -11,6 +11,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -22,6 +23,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -29,9 +35,15 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -51,7 +63,8 @@ public final class ChessAssistantPatch {
     private static final String TAG = "morphe.chess.assistant.analysis";
     private static final String BOARD_CLASS_V2 = "com.chess.chessboard.v2.ChessBoardView";
     private static final String BOARD_CLASS_V1 = "com.chess.chessboard.view.ChessBoardView";
-    private static final String CHESS_API_URL = "https://chess-api.com/v1";
+    private static final String CHESS_API_HOST = "chess-api.com";
+    private static final String CHESS_API_PATH = "/v1";
     private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
     private static final int ENGINE_DEPTH = 12;
     private static final int ENGINE_VARIANTS = 5;
@@ -501,83 +514,106 @@ public final class ChessAssistantPatch {
     }
 
     private static EngineResult fetchChessApi(String fen) {
-        HttpURLConnection connection = null;
+        SSLSocket socket = null;
         try {
+            socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
+            socket.connect(new InetSocketAddress(CHESS_API_HOST, 443), 8000);
+            socket.setSoTimeout(16000);
+
+            BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
+            BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
+
+            byte[] nonce = new byte[16];
+            new SecureRandom().nextBytes(nonce);
+            String webSocketKey = Base64.encodeToString(nonce, Base64.NO_WRAP);
+            String request = "GET " + CHESS_API_PATH + " HTTP/1.1\r\n"
+                    + "Host: " + CHESS_API_HOST + "\r\n"
+                    + "Upgrade: websocket\r\n"
+                    + "Connection: Upgrade\r\n"
+                    + "Sec-WebSocket-Key: " + webSocketKey + "\r\n"
+                    + "Sec-WebSocket-Version: 13\r\n"
+                    + "Origin: https://chess-api.com\r\n"
+                    + "User-Agent: ChessAssistant-Morphe/1.2\r\n\r\n";
+            output.write(request.getBytes(StandardCharsets.US_ASCII));
+            output.flush();
+
+            String handshake = readWebSocketHandshake(input);
+            if (!handshake.startsWith("HTTP/1.1 101") && !handshake.startsWith("HTTP/1.0 101")) {
+                return EngineResult.error("WebSocket recusado pelo serviço");
+            }
+            String expectedAccept = Base64.encodeToString(
+                    MessageDigest.getInstance("SHA-1").digest(
+                            (webSocketKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                                    .getBytes(StandardCharsets.US_ASCII)
+                    ),
+                    Base64.NO_WRAP
+            );
+            if (!handshake.toLowerCase(java.util.Locale.US)
+                    .contains("sec-websocket-accept: " + expectedAccept.toLowerCase(java.util.Locale.US))) {
+                return EngineResult.error("handshake WebSocket inválido");
+            }
+
             JSONObject payload = new JSONObject();
             payload.put("fen", fen);
             payload.put("depth", ENGINE_DEPTH);
             payload.put("maxThinkingTime", ENGINE_MAX_THINKING_TIME_MS);
             payload.put("variants", ENGINE_VARIANTS);
-
-            connection = (HttpURLConnection) new URL(CHESS_API_URL).openConnection();
-            connection.setRequestMethod("POST");
-            connection.setDoOutput(true);
-            connection.setConnectTimeout(8000);
-            connection.setReadTimeout(15000);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/1.1");
-
-            byte[] requestBody = payload.toString().getBytes(StandardCharsets.UTF_8);
-            connection.setFixedLengthStreamingMode(requestBody.length);
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(requestBody);
-                output.flush();
-            }
-
-            int code = connection.getResponseCode();
-            InputStream stream = code >= 200 && code < 300
-                    ? connection.getInputStream() : connection.getErrorStream();
-            if (stream == null) return EngineResult.error("HTTP " + code);
-
-            StringBuilder body = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) body.append(line);
-            }
-            if (code < 200 || code >= 300) return EngineResult.error("chess-api HTTP " + code);
-
-            JSONObject json = new JSONObject(body.toString());
-            if ("error".equalsIgnoreCase(json.optString("type", ""))) {
-                return EngineResult.error(json.optString("text", "erro retornado pelo serviço"));
-            }
+            sendWebSocketFrame(output, 0x1, payload.toString().getBytes(StandardCharsets.UTF_8));
 
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
             ArrayList<CandidateMove> found = new ArrayList<>();
+            boolean receivedBestMove = false;
+            long deadline = System.currentTimeMillis() + 15500L;
 
-            CandidateMove primary = parseCandidate(json, whiteToMove);
-            if (primary != null) found.add(primary);
-
-            JSONArray variants = json.optJSONArray("variants");
-            if (variants != null) {
-                for (int i = 0; i < variants.length(); i++) {
-                    JSONObject item = variants.optJSONObject(i);
-                    if (item == null) continue;
-                    CandidateMove candidate = parseCandidate(item, whiteToMove);
-                    if (candidate == null) continue;
-
-                    boolean duplicate = false;
-                    for (CandidateMove current : found) {
-                        if (current.move.equals(candidate.move)) {
-                            duplicate = true;
-                            break;
-                        }
-                    }
-                    if (!duplicate) found.add(candidate);
+            while (System.currentTimeMillis() < deadline) {
+                String message;
+                try {
+                    message = readWebSocketTextMessage(new DataInputStream(input), output);
+                } catch (SocketTimeoutException timeout) {
+                    break;
                 }
+                if (message == null) break;
+
+                JSONObject json;
+                try {
+                    json = new JSONObject(message);
+                } catch (Exception ignored) {
+                    continue;
+                }
+
+                String type = json.optString("type", "").toLowerCase(java.util.Locale.US);
+                if ("error".equals(type)) {
+                    return EngineResult.error(json.optString("text", "erro do serviço MultiPV"));
+                }
+
+                CandidateMove candidate = parseCandidate(json, whiteToMove);
+                if (candidate != null) {
+                    addOrUpdateCandidate(found, candidate);
+                }
+
+                // Chess API streams variant candidates as "move" messages and marks
+                // the completed analysis with a final "bestmove" message.
+                if ("bestmove".equals(type)) {
+                    receivedBestMove = true;
+                    break;
+                }
+                if (found.size() >= ENGINE_VARIANTS) break;
             }
 
             if (found.isEmpty()) {
-                return EngineResult.error(json.optString("text", "o serviço não retornou jogadas"));
+                return EngineResult.error("o WebSocket não retornou variantes");
             }
 
             Collections.sort(found, (left, right) ->
                     Double.compare(right.scoreForMover(), left.scoreForMover()));
 
+            // Keep at most the requested MultiPV alternatives. Distinct first moves
+            // are retained so all arrows can be drawn simultaneously on the board.
+            while (found.size() > ENGINE_VARIANTS) found.remove(found.size() - 1);
+
+            CandidateMove best = found.get(0).withLabel("MELHOR");
             ArrayList<CandidateMove> selected = new ArrayList<>();
-            CandidateMove best = found.get(0);
-            selected.add(best.withLabel("MELHOR"));
+            selected.add(best);
 
             if (found.size() > 1) {
                 CandidateMove good = found.get(1);
@@ -598,32 +634,131 @@ public final class ChessAssistantPatch {
             return new EngineResult(best.move, best.evaluation, best.mate, null, candidates);
         } catch (Exception ex) {
             String message = ex.getMessage();
-            if (message == null || message.trim().isEmpty()) message = "falha na análise MultiPV";
+            if (message == null || message.trim().isEmpty()) message = "falha na conexão MultiPV";
             if (message.length() > 90) message = message.substring(0, 90);
             return EngineResult.error(message);
         } finally {
-            if (connection != null) connection.disconnect();
+            if (socket != null) {
+                try { socket.close(); } catch (Exception ignored) {}
+            }
         }
     }
 
-    private static CandidateMove parseCandidate(JSONObject json, boolean whiteToMove) {
-        String move = json.optString("move", "").trim();
-        if (!isUciMove(move)) move = json.optString("lan", "").trim();
-        if (!isUciMove(move)) return null;
-
-        double evaluation = json.optDouble("eval", Double.NaN);
-        if (Double.isNaN(evaluation)) {
-            String centipawns = json.optString("centipawns", "");
-            try {
-                evaluation = Double.parseDouble(centipawns) / 100.0;
-            } catch (NumberFormatException ignored) {
-                evaluation = 0.0;
+    private static void addOrUpdateCandidate(ArrayList<CandidateMove> candidates, CandidateMove incoming) {
+        for (int i = 0; i < candidates.size(); i++) {
+            CandidateMove current = candidates.get(i);
+            if (current.move.equalsIgnoreCase(incoming.move)) {
+                if (incoming.depth >= current.depth || "bestmove".equalsIgnoreCase(incoming.label)) {
+                    candidates.set(i, incoming);
+                }
+                return;
             }
         }
+        candidates.add(incoming);
+    }
 
-        int mate = json.isNull("mate") ? 0 : json.optInt("mate", 0);
-        int depth = json.optInt("depth", ENGINE_DEPTH);
-        return new CandidateMove(move, evaluation, mate, depth, whiteToMove, "");
+    private static String readWebSocketHandshake(BufferedInputStream input) throws Exception {
+        StringBuilder headers = new StringBuilder();
+        int matched = 0;
+        while (headers.length() < 16384) {
+            int value = input.read();
+            if (value < 0) throw new EOFException("handshake interrompido");
+            headers.append((char) value);
+            if ((matched == 0 || matched == 2) && value == '\r') matched++;
+            else if ((matched == 1 || matched == 3) && value == '\n') {
+                matched++;
+                if (matched == 4) return headers.toString();
+            } else {
+                matched = value == '\r' ? 1 : 0;
+            }
+        }
+        throw new IOException("cabeçalhos WebSocket muito longos");
+    }
+
+    private static void sendWebSocketFrame(BufferedOutputStream output, int opcode, byte[] payload)
+            throws IOException {
+        SecureRandom random = new SecureRandom();
+        byte[] mask = new byte[4];
+        random.nextBytes(mask);
+
+        output.write(0x80 | (opcode & 0x0F));
+        int length = payload == null ? 0 : payload.length;
+        if (length < 126) {
+            output.write(0x80 | length);
+        } else if (length <= 65535) {
+            output.write(0x80 | 126);
+            output.write((length >>> 8) & 0xFF);
+            output.write(length & 0xFF);
+        } else {
+            output.write(0x80 | 127);
+            long longLength = length;
+            for (int i = 7; i >= 0; i--) output.write((int) (longLength >>> (8 * i)) & 0xFF);
+        }
+
+        output.write(mask);
+        if (payload != null) {
+            byte[] masked = new byte[length];
+            for (int i = 0; i < length; i++) masked[i] = (byte) (payload[i] ^ mask[i & 3]);
+            output.write(masked);
+        }
+        output.flush();
+    }
+
+    private static String readWebSocketTextMessage(DataInputStream input, BufferedOutputStream output)
+            throws IOException {
+        ByteArrayOutputStream message = new ByteArrayOutputStream();
+        boolean receivingText = false;
+
+        while (true) {
+            int first = input.readUnsignedByte();
+            int second = input.readUnsignedByte();
+            boolean fin = (first & 0x80) != 0;
+            int opcode = first & 0x0F;
+            boolean masked = (second & 0x80) != 0;
+            long length = second & 0x7F;
+
+            if (length == 126) {
+                length = ((long) input.readUnsignedByte() << 8) | input.readUnsignedByte();
+            } else if (length == 127) {
+                length = 0;
+                for (int i = 0; i < 8; i++) length = (length << 8) | input.readUnsignedByte();
+            }
+            if (length < 0 || length > 1024 * 1024) {
+                throw new IOException("quadro WebSocket excedeu o limite");
+            }
+
+            byte[] mask = null;
+            if (masked) {
+                mask = new byte[4];
+                input.readFully(mask);
+            }
+            byte[] payload = new byte[(int) length];
+            input.readFully(payload);
+            if (masked && mask != null) {
+                for (int i = 0; i < payload.length; i++) payload[i] = (byte) (payload[i] ^ mask[i & 3]);
+            }
+
+            if (opcode == 0x8) return null;
+            if (opcode == 0x9) {
+                sendWebSocketFrame(output, 0xA, payload);
+                continue;
+            }
+            if (opcode == 0xA) continue;
+
+            if (opcode == 0x1) {
+                message.reset();
+                message.write(payload);
+                receivingText = true;
+            } else if (opcode == 0x0 && receivingText) {
+                message.write(payload);
+            } else {
+                continue;
+            }
+
+            if (fin && receivingText) {
+                return new String(message.toByteArray(), StandardCharsets.UTF_8);
+            }
+        }
     }
 
     private static boolean isUciMove(String move) {
@@ -749,6 +884,9 @@ public final class ChessAssistantPatch {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fromSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint toSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint badgeBackgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint badgeStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint badgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private View board;
         private CandidateMove[] candidates = new CandidateMove[0];
         private double evaluation = 0.0;
@@ -759,6 +897,12 @@ public final class ChessAssistantPatch {
             super(context);
             setWillNotDraw(false);
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+            badgeBackgroundPaint.setColor(0xE820242B);
+            badgeBackgroundPaint.setStyle(Paint.Style.FILL);
+            badgeStrokePaint.setStyle(Paint.Style.STROKE);
+            badgeTextPaint.setColor(0xFFFFFFFF);
+            badgeTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            badgeTextPaint.setTextSize(dp(context, 10));
         }
 
         void setBoard(View value) {
@@ -809,14 +953,14 @@ public final class ChessAssistantPatch {
 
             if (candidates.length == 0) return;
 
-            // Draw weaker alternatives first so the best move remains visually on top.
+            // Weaker alternatives are painted first; the best move remains on top.
             for (int i = candidates.length - 1; i >= 0; i--) {
-                drawCandidate(canvas, candidates[i], i, left, top, square);
+                drawCandidate(canvas, candidates[i], i, left, top, size, square);
             }
         }
 
         private void drawCandidate(Canvas canvas, CandidateMove candidate, int index,
-                                   float left, float top, float square) {
+                                   float left, float top, float boardSize, float square) {
             String move = candidate.move;
             if (!isUciMove(move)) return;
 
@@ -877,6 +1021,41 @@ public final class ChessAssistantPatch {
             arrowHead.close();
             paint.setStyle(Paint.Style.FILL);
             canvas.drawPath(arrowHead, paint);
+
+            // A separate on-board text balloon identifies every arrow, not just the list entry.
+            drawMoveBadge(canvas, candidate, index, color, endX, endY, left, top, boardSize);
+        }
+
+        private void drawMoveBadge(Canvas canvas, CandidateMove candidate, int index, int color,
+                                   float endX, float endY, float boardLeft, float boardTop,
+                                   float boardSize) {
+            String fromTo = candidate.move.substring(0, 2) + "→" + candidate.move.substring(2, 4);
+            String text = candidate.label + " " + fromTo;
+            if (candidate.move.length() > 4) text += "=" + Character.toUpperCase(candidate.move.charAt(4));
+
+            float paddingX = dp(getContext(), 5);
+            float paddingY = dp(getContext(), 3);
+            float textWidth = badgeTextPaint.measureText(text);
+            float boxWidth = textWidth + paddingX * 2;
+            float boxHeight = badgeTextPaint.getTextSize() + paddingY * 2;
+            float gap = dp(getContext(), 3);
+
+            float x = endX + gap;
+            if (x + boxWidth > boardLeft + boardSize) x = endX - boxWidth - gap;
+            x = Math.max(boardLeft + gap, Math.min(x, boardLeft + boardSize - boxWidth - gap));
+
+            float verticalOffset = (index - 1) * (boxHeight + dp(getContext(), 3));
+            float y = endY - boxHeight / 2f + verticalOffset;
+            y = Math.max(boardTop + gap, Math.min(y, boardTop + boardSize - boxHeight - gap));
+
+            RectF box = new RectF(x, y, x + boxWidth, y + boxHeight);
+            badgeBackgroundPaint.setColor(0xE820242B);
+            badgeStrokePaint.setColor(color);
+            badgeStrokePaint.setStrokeWidth(dp(getContext(), 1.5f));
+            canvas.drawRoundRect(box, dp(getContext(), 6), dp(getContext(), 6), badgeBackgroundPaint);
+            canvas.drawRoundRect(box, dp(getContext(), 6), dp(getContext(), 6), badgeStrokePaint);
+            canvas.drawText(text, x + paddingX, y + paddingY + badgeTextPaint.getTextSize() * 0.82f,
+                    badgeTextPaint);
         }
     }
 
