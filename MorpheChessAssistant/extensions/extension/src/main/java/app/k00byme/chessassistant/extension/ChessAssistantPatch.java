@@ -75,6 +75,10 @@ public final class ChessAssistantPatch {
     private static final long BOARD_POLL_INTERVAL_MS = 350L;
     private static final long AUTO_MIN_DELAY_MS = 2000L;
     private static final long AUTO_MAX_DELAY_MS = 5000L;
+    private static final int SPECIAL_ENGINE_DEPTH = 18;
+    private static final int SPECIAL_ENGINE_VARIANTS = 4;
+    private static final int SPECIAL_ENGINE_MAX_THINKING_TIME_MS = 900;
+    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 10000L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private ChessAssistantPatch() {}
@@ -137,6 +141,11 @@ public final class ChessAssistantPatch {
         private boolean autoEnabled;
         private boolean autoMoveInProgress;
         private String lastAutoFen = "";
+        private boolean specialRequestInFlight;
+        private String specialRequestedFen = "";
+        private String analysisSummary = "";
+        private String specialMessage = "";
+        private String specialMove = "";
 
         AnalysisOverlay(Activity activity) {
             super(activity);
@@ -271,6 +280,11 @@ public final class ChessAssistantPatch {
             evaluation = 0.0;
             mate = 0;
             candidates = new CandidateMove[0];
+            analysisSummary = "";
+            specialMessage = "";
+            specialMove = "";
+            specialRequestedFen = "";
+            drawing.setSpecialMove("");
             drawing.setEngine(candidates, evaluation, mate, boardView != null && isBoardFlipped(boardView));
         }
 
@@ -307,10 +321,12 @@ public final class ChessAssistantPatch {
                                 ? "Mate em " + result.mate
                                 : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
                         String mode = candidates.length >= 2 ? "2 opções" : candidates.length + " opção(ões)";
-                        setStatus("STOCKFISH 18  •  profundidade " + ENGINE_DEPTH
+                        analysisSummary = "STOCKFISH 18  •  profundidade " + ENGINE_DEPTH
                                 + "\nAvaliação: " + evalText
-                                + "\n" + mode);
+                                + "\n" + mode;
+                        setStatus(analysisSummary);
                         drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(boardView));
+                        if (candidates.length >= 2) requestSpecialAnalysis(fen, candidates.clone());
                         if (autoEnabled) maybeAutoMove(fen);
                     });
                 });
@@ -320,6 +336,71 @@ public final class ChessAssistantPatch {
             }
         }
 
+
+
+        /**
+         * A second, deeper pass is deliberately separate from normal assistance.
+         * It runs only when the quick MultiPV result suggests a unique line,
+         * a tactical sacrifice, a decisive continuation, or a forced mate.
+         */
+        private boolean shouldRequestSpecialAnalysis(String fen, CandidateMove[] normal) {
+            if (normal == null || normal.length < 2) return false;
+            CandidateMove first = normal[0];
+            CandidateMove second = normal[1];
+            double best = first.scoreForMover();
+            double next = second.scoreForMover();
+            double gap = best - next;
+            return first.mate != 0 || second.mate != 0
+                    || gap >= 0.45
+                    || best >= 1.10
+                    || isLikelyMaterialSacrifice(fen, first.move)
+                    || isLikelyMaterialSacrifice(fen, second.move);
+        }
+
+        private void requestSpecialAnalysis(final String fen, final CandidateMove[] normal) {
+            if (closed || !isAttachedToWindow() || !fen.equals(activeFen)
+                    || !shouldRequestSpecialAnalysis(fen, normal)
+                    || fen.equals(specialRequestedFen) || specialRequestInFlight) return;
+
+            specialRequestedFen = fen;
+            specialRequestInFlight = true;
+            try {
+                worker.execute(() -> {
+                    EngineResult deep = fetchSpecialAnalysis(fen);
+                    final SpecialFinding finding = deep.error == null
+                            ? findSpecialFinding(fen, normal, deep) : null;
+                    MAIN.post(() -> {
+                        specialRequestInFlight = false;
+                        if (closed || !isAttachedToWindow()) return;
+
+                        // Ignore stale deep results if the board has already advanced.
+                        if (!fen.equals(activeFen)) {
+                            if (isFen(activeFen) && candidates.length >= 2) {
+                                requestSpecialAnalysis(activeFen, candidates.clone());
+                            }
+                            return;
+                        }
+
+                        specialMove = finding == null ? "" : finding.candidate.move;
+                        specialMessage = finding == null ? "" : finding.title
+                                + "\\n" + finding.detail;
+                        drawing.setSpecialMove(specialMove);
+                        if (finding != null) {
+                            setStatus(analysisSummary + "\\n\\n✦ ASSISTÊNCIA ESPECIAL\\n"
+                                    + specialMessage + "\\nLance: " + formatMove(specialMove));
+                        }
+                    });
+                });
+            } catch (RuntimeException ex) {
+                specialRequestInFlight = false;
+            }
+        }
+
+        private static String formatMove(String move) {
+            if (!isUciMove(move)) return move == null ? "" : move;
+            return move.substring(0, 2) + " → " + move.substring(2, 4)
+                    + (move.length() == 5 ? " = " + move.substring(4).toUpperCase(java.util.Locale.US) : "");
+        }
 
         private void updateAutoButton() {
             if (autoButton == null) return;
@@ -754,6 +835,137 @@ public final class ChessAssistantPatch {
                 && fields[5].matches("\\d+");
     }
 
+
+    private static EngineResult fetchSpecialAnalysis(String fen) {
+        EngineResult result = fetchChessApi(
+                fen,
+                SPECIAL_ENGINE_DEPTH,
+                SPECIAL_ENGINE_VARIANTS,
+                SPECIAL_ENGINE_MAX_THINKING_TIME_MS,
+                SPECIAL_ENGINE_TIMEOUT_MS,
+                true
+        );
+        if (result.error != null) return result;
+        if (result.candidates.length < 2) {
+            return EngineResult.error("análise profunda não confirmou alternativas suficientes");
+        }
+        return result;
+    }
+
+    private static SpecialFinding findSpecialFinding(String fen, CandidateMove[] normal,
+                                                     EngineResult deep) {
+        if (deep == null || deep.error != null || deep.candidates.length < 2) return null;
+        CandidateMove first = deep.candidates[0];
+        CandidateMove second = deep.candidates[1];
+        double best = first.scoreForMover();
+        double next = second.scoreForMover();
+        double gap = best - next;
+
+        if (first.mate != 0 && best > 500.0 && gap >= 0.5) {
+            return new SpecialFinding(first, "SEQUÊNCIA TÁTICA EXCEPCIONAL",
+                    "A análise profunda confirmou uma linha forçada de mate.");
+        }
+        if (isLikelyMaterialSacrifice(fen, first.move) && best >= 0.9 && gap >= 0.8) {
+            return new SpecialFinding(first, "SACRIFÍCIO COM COMPENSAÇÃO",
+                    "O motor confirma compensação suficiente apesar da peça ficar capturável.");
+        }
+        if (best >= -0.30 && next <= -1.50 && gap >= 1.20) {
+            return new SpecialFinding(first, "ÚNICA JOGADA",
+                    "Esta linha mantém a posição; as alternativas analisadas deixam o lado em desvantagem decisiva.");
+        }
+        if (best >= 1.60 && gap >= 1.25) {
+            return new SpecialFinding(first, "JOGADA VENCEDORA",
+                    "A busca profunda encontrou uma vantagem decisiva que não aparece nas alternativas.");
+        }
+        if (normal != null && normal.length > 0
+                && normal[0].scoreForMover() <= 0.20
+                && best >= 1.50 && gap >= 0.90) {
+            return new SpecialFinding(first, "CONTINUAÇÃO OCULTA",
+                    "A avaliação superficial parecia desfavorável, mas a linha profunda confirma uma continuação vencedora.");
+        }
+        return null;
+    }
+
+    private static boolean isLikelyMaterialSacrifice(String fen, String move) {
+        if (!isUciMove(move)) return false;
+        String[] fields = fen == null ? new String[0] : fen.split("\\s+");
+        if (fields.length != 6) return false;
+        String[] ranks = fields[0].split("/");
+        if (ranks.length != 8) return false;
+
+        char[][] board = new char[8][8];
+        for (int r = 0; r < 8; r++) {
+            int file = 0;
+            for (int i = 0; i < ranks[r].length(); i++) {
+                char token = ranks[r].charAt(i);
+                if (token >= '1' && token <= '8') {
+                    int count = token - '0';
+                    while (count-- > 0 && file < 8) board[r][file++] = '.';
+                } else if (file < 8) {
+                    board[r][file++] = token;
+                }
+            }
+            if (file != 8) return false;
+        }
+
+        int fromFile = move.charAt(0) - 'a';
+        int fromRow = 8 - (move.charAt(1) - '0');
+        int toFile = move.charAt(2) - 'a';
+        int toRow = 8 - (move.charAt(3) - '0');
+        if (fromRow < 0 || fromRow > 7 || toRow < 0 || toRow > 7
+                || fromFile < 0 || fromFile > 7 || toFile < 0 || toFile > 7) return false;
+
+        char piece = board[fromRow][fromFile];
+        if (piece == '.' || Character.toLowerCase(piece) == 'p'
+                || Character.toLowerCase(piece) == 'k' || board[toRow][toFile] != '.') return false;
+
+        board[fromRow][fromFile] = '.';
+        board[toRow][toFile] = piece;
+        boolean opponentIsWhite = Character.isLowerCase(piece);
+        return isSquareAttacked(board, toRow, toFile, opponentIsWhite);
+    }
+
+    private static boolean isSquareAttacked(char[][] board, int targetRow, int targetFile,
+                                            boolean byWhite) {
+        for (int row = 0; row < 8; row++) {
+            for (int file = 0; file < 8; file++) {
+                char piece = board[row][file];
+                if (piece == '.' || Character.isUpperCase(piece) != byWhite) continue;
+                char type = Character.toLowerCase(piece);
+                int dr = targetRow - row;
+                int df = targetFile - file;
+
+                if (type == 'p') {
+                    if (Math.abs(df) == 1 && dr == (byWhite ? -1 : 1)) return true;
+                } else if (type == 'n') {
+                    if ((Math.abs(dr) == 2 && Math.abs(df) == 1)
+                            || (Math.abs(dr) == 1 && Math.abs(df) == 2)) return true;
+                } else if (type == 'k') {
+                    if (Math.max(Math.abs(dr), Math.abs(df)) == 1) return true;
+                } else {
+                    boolean diagonal = Math.abs(dr) == Math.abs(df) && dr != 0;
+                    boolean straight = (dr == 0) != (df == 0);
+                    if ((type == 'b' && !diagonal)
+                            || (type == 'r' && !straight)
+                            || (type == 'q' && !diagonal && !straight)) continue;
+
+                    int stepRow = Integer.signum(dr);
+                    int stepFile = Integer.signum(df);
+                    int r = row + stepRow;
+                    int f = file + stepFile;
+                    boolean clear = true;
+                    while (r != targetRow || f != targetFile) {
+                        if (board[r][f] != '.') { clear = false; break; }
+                        r += stepRow;
+                        f += stepFile;
+                    }
+                    if (clear) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static EngineResult fetchAnalysis(String fen) {
         EngineResult multiPv = fetchChessApi(fen);
         if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
@@ -776,6 +988,13 @@ public final class ChessAssistantPatch {
     }
 
     private static EngineResult fetchChessApi(String fen) {
+        return fetchChessApi(fen, ENGINE_DEPTH, ENGINE_VARIANTS,
+                ENGINE_MAX_THINKING_TIME_MS, 6000L, false);
+    }
+
+    private static EngineResult fetchChessApi(String fen, int depth, int variants,
+                                              int maxThinkingTimeMs, long timeoutMs,
+                                              boolean waitForFinal) {
         SSLSocket socket = null;
         try {
             socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
@@ -817,14 +1036,14 @@ public final class ChessAssistantPatch {
 
             JSONObject payload = new JSONObject();
             payload.put("fen", fen);
-            payload.put("depth", ENGINE_DEPTH);
-            payload.put("maxThinkingTime", ENGINE_MAX_THINKING_TIME_MS);
-            payload.put("variants", ENGINE_VARIANTS);
+            payload.put("depth", depth);
+            payload.put("maxThinkingTime", maxThinkingTimeMs);
+            payload.put("variants", variants);
             sendWebSocketFrame(output, 0x1, payload.toString().getBytes(StandardCharsets.UTF_8));
 
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
             ArrayList<CandidateMove> found = new ArrayList<>();
-            long deadline = System.currentTimeMillis() + 6000L;
+            long deadline = System.currentTimeMillis() + timeoutMs;
 
             while (System.currentTimeMillis() < deadline) {
                 String message;
@@ -858,9 +1077,9 @@ public final class ChessAssistantPatch {
 
                 collectCandidatePayload(json, whiteToMove, found);
 
-                // Request only two lines and return as soon as both distinct first moves arrive.
-                // This avoids waiting for deeper refinement of a third, weaker alternative.
-                if (found.size() >= ENGINE_VARIANTS || "bestmove".equals(type)) break;
+                // Normal assistance returns quickly after its requested lines arrive.
+                // Special assistance waits for the final engine message so the deeper search can refine them.
+                if ((!waitForFinal && found.size() >= variants) || "bestmove".equals(type)) break;
             }
 
             if (found.isEmpty()) {
@@ -872,7 +1091,10 @@ public final class ChessAssistantPatch {
 
             // Keep at most the requested MultiPV alternatives. Distinct first moves
             // are retained so all arrows can be drawn simultaneously on the board.
-            while (found.size() > ENGINE_VARIANTS) found.remove(found.size() - 1);
+            while (found.size() > variants) found.remove(found.size() - 1);
+            for (int i = 0; i < found.size(); i++) {
+                if (found.get(i).depth < depth) found.set(i, found.get(i).withDepth(depth));
+            }
 
             CandidateMove best = found.get(0).withLabel("EXCELENTE");
             ArrayList<CandidateMove> selected = new ArrayList<>();
@@ -1147,6 +1369,22 @@ public final class ChessAssistantPatch {
         CandidateMove withLabel(String value) {
             return new CandidateMove(move, evaluation, mate, depth, whiteToMove, value);
         }
+
+        CandidateMove withDepth(int value) {
+            return new CandidateMove(move, evaluation, mate, value, whiteToMove, label);
+        }
+    }
+
+    private static final class SpecialFinding {
+        final CandidateMove candidate;
+        final String title;
+        final String detail;
+
+        SpecialFinding(CandidateMove candidate, String title, String detail) {
+            this.candidate = candidate;
+            this.title = title;
+            this.detail = detail;
+        }
     }
 
     private static final class EngineResult {
@@ -1189,6 +1427,7 @@ public final class ChessAssistantPatch {
         private double evaluation = 0.0;
         private int mate = 0;
         private boolean flipped;
+        private String specialMove = "";
 
         BoardDrawing(Context context) {
             super(context);
@@ -1198,6 +1437,11 @@ public final class ChessAssistantPatch {
 
         void setBoard(View value) {
             if (board != value) board = value;
+            invalidate();
+        }
+
+        void setSpecialMove(String move) {
+            specialMove = move == null ? "" : move;
             invalidate();
         }
 
@@ -1246,12 +1490,17 @@ public final class ChessAssistantPatch {
 
             // Weaker alternatives are painted first; the best move remains on top.
             for (int i = candidates.length - 1; i >= 0; i--) {
-                drawCandidate(canvas, candidates[i], i, left, top, square);
+                drawCandidate(canvas, candidates[i], i, left, top, square, false);
+            }
+            if (isUciMove(specialMove)) {
+                CandidateMove exceptional = new CandidateMove(
+                        specialMove, evaluation, mate, SPECIAL_ENGINE_DEPTH, false, "ESPECIAL");
+                drawCandidate(canvas, exceptional, 0, left, top, square, true);
             }
         }
 
         private void drawCandidate(Canvas canvas, CandidateMove candidate, int index,
-                                   float left, float top, float square) {
+                                   float left, float top, float square, boolean special) {
             String move = candidate.move;
             if (!isUciMove(move)) return;
 
@@ -1270,7 +1519,8 @@ public final class ChessAssistantPatch {
             float endX = left + (toColumn + 0.5f) * square;
             float endY = top + (toRow + 0.5f) * square;
 
-            int color = MOVE_COLORS[Math.min(index, MOVE_COLORS.length - 1)];
+            int color = special ? 0xFFBD75FF
+                    : MOVE_COLORS[Math.min(index, MOVE_COLORS.length - 1)];
 
             // Highlight every suggested move: origin in blue, destination in that move's arrow color.
             float inset = square * 0.055f;
