@@ -1,4 +1,5 @@
 name: Build Morphe Chess Assistant
+run-name: Build Chess Assistant with bot AUTO mode
 
 on:
   push:
