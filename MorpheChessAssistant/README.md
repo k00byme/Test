@@ -4,9 +4,9 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 
 ## Supported screens
 
-- **Play vs Bots:** `BotGameActivityV2`. The optional AUTO control is available only here.
+- **Online human games:** `RealGameActivity`. The evaluation panel and two visual move suggestions are available; automatic move execution is disabled.
+- **Play vs Bots:** `BotGameActivityV2`. The evaluation panel, move suggestions, and optional AUTO control are available.
 - **Standalone analysis:** `StandaloneAnalysisActivityV2`.
-- **Human live games:** not hooked by this build.
 
 ## Move assistance
 
@@ -16,14 +16,15 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 - Blue origin-square highlight and destination highlight matching each arrow.
 - No third / worst-move suggestion, badges, or text labels.
 - Board orientation handling and stale-overlay clearing.
+- The visual assistance remains enabled for online games as in the earlier build. AUTO never sends moves in human-vs-human games.
 
-The MultiPV request now asks for two lines instead of five, uses a lower depth and a shorter thinking budget, returns when both distinct first moves arrive, and polls the board more frequently. This is intended to reduce latency; actual timing still depends on network conditions and the external service.
+The MultiPV request asks for two lines instead of five, uses a lower depth and a shorter thinking budget, returns when both distinct first moves arrive, and polls the board more frequently. Actual timing still depends on network conditions and the external service.
 
 ## Automatic play against bots
 
 The bot-game screen has a separate **AUTO ON/OFF** control positioned outside the board. It starts disabled and can be toggled during a game.
 
-When enabled, it waits for the human player's turn and selects the engine's best line most of the time, choosing the second line approximately once in five moves. It never selects a third or deliberately bad line. Automatic input is sent only to the native board view in `BotGameActivityV2`; it is not injected into live games against human opponents.
+When enabled, it waits for the human player's turn and selects the engine's best line most of the time, choosing the second line approximately once in five moves. Before each automatic move it waits a random **2 to 5 seconds**. It never selects a third or deliberately bad line. Automatic input is sent only to the native board view in `BotGameActivityV2`.
 
 The player's color is read from exposed activity/board metadata when available, with board orientation as a fallback. The control is hidden if no free area exists around the board where it can be displayed without covering squares.
 
@@ -39,4 +40,4 @@ The GitHub Actions workflow **Build Morphe Chess Assistant** runs `gradle buildA
 
 ## Verification status
 
-The patch source is compiled by GitHub Actions. Automatic touch delivery, control placement, candidate timing, and bot-side color detection still require runtime confirmation on an Android device. Successful compilation alone does not prove that the app accepts the injected touch events in every bot-game layout.
+The patch source is compiled by GitHub Actions. Automatic touch delivery, control placement, the random delay, online overlay rendering, candidate timing, and bot-side color detection still require runtime confirmation on an Android device. Successful compilation alone does not prove runtime behavior.

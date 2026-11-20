@@ -73,6 +73,8 @@ public final class ChessAssistantPatch {
     private static final int ENGINE_VARIANTS = 2;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 80;
     private static final long BOARD_POLL_INTERVAL_MS = 350L;
+    private static final long AUTO_MIN_DELAY_MS = 2000L;
+    private static final long AUTO_MAX_DELAY_MS = 5000L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private ChessAssistantPatch() {}
@@ -82,7 +84,8 @@ public final class ChessAssistantPatch {
         if (activity == null) return;
         String activityName = activity.getClass().getName();
         boolean supported = "com.chess.features.versusbots.game.BotGameActivityV2".equals(activityName)
-                || "com.chess.features.analysis.standalonev2.StandaloneAnalysisActivityV2".equals(activityName);
+                || "com.chess.features.analysis.standalonev2.StandaloneAnalysisActivityV2".equals(activityName)
+                || "com.chess.realchess.ui.game.RealGameActivity".equals(activityName);
         if (!supported) return;
 
         // onCreate is hooked before the app creates its content view, so defer installation.
@@ -114,6 +117,7 @@ public final class ChessAssistantPatch {
         private final boolean botGame;
         private final TextView autoButton;
         private final Random autoSelector = new Random();
+        private final Random autoTiming = new Random();
         private final Runnable poller = new Runnable() {
             @Override public void run() {
                 scanAndAnalyze();
@@ -421,8 +425,11 @@ public final class ChessAssistantPatch {
             final CandidateMove move = selected;
             final View targetBoard = boardView;
             final boolean flipped = isBoardFlipped(targetBoard);
+            final long delayMs = AUTO_MIN_DELAY_MS
+                    + autoTiming.nextInt((int) (AUTO_MAX_DELAY_MS - AUTO_MIN_DELAY_MS + 1L));
             lastAutoFen = fen;
             autoMoveInProgress = true;
+            setStatus("AUTO: jogada em " + (delayMs / 1000.0) + " s.");
 
             handler.postDelayed(() -> {
                 if (!autoEnabled || closed || !isAttachedToWindow()
@@ -440,7 +447,7 @@ public final class ChessAssistantPatch {
 
                 setStatus("AUTO: jogada selecionada pela análise.");
                 handler.postDelayed(() -> autoMoveInProgress = false, 450L);
-            }, 220L);
+            }, delayMs);
         }
 
         private boolean dispatchAutomaticMove(View board, String move, boolean flipped, String fen) {
