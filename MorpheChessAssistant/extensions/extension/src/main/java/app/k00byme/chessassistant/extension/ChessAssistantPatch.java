@@ -383,11 +383,11 @@ public final class ChessAssistantPatch {
 
                         specialMove = finding == null ? "" : finding.candidate.move;
                         specialMessage = finding == null ? "" : finding.title
-                                + "\\n" + finding.detail;
+                                + "\n" + finding.detail;
                         drawing.setSpecialMove(specialMove);
                         if (finding != null) {
-                            setStatus(analysisSummary + "\\n\\n✦ ASSISTÊNCIA ESPECIAL\\n"
-                                    + specialMessage + "\\nLance: " + formatMove(specialMove));
+                            setStatus(analysisSummary + "\n\n✦ ASSISTÊNCIA ESPECIAL\n"
+                                    + specialMessage + "\nLance: " + formatMove(specialMove));
                         }
                     });
                 });
@@ -1075,7 +1075,9 @@ public final class ChessAssistantPatch {
                             json.optString("error", "erro do serviço MultiPV")));
                 }
 
-                collectCandidatePayload(json, whiteToMove, found);
+                if (!"bestmove".equals(type) || json.has("eval") || json.has("centipawns")) {
+                    collectCandidatePayload(json, whiteToMove, found);
+                }
 
                 // Normal assistance returns quickly after its requested lines arrive.
                 // Special assistance waits for the final engine message so the deeper search can refine them.
