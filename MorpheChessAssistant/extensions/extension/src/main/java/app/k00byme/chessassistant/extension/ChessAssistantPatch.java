@@ -1339,11 +1339,15 @@ public final class ChessAssistantPatch {
         if (!isUciMove(move)) move = json.optString("uci", "").trim();
         if (!isUciMove(move)) {
             String raw = json.optString("bestmove", "").trim();
-            if (raw.isEmpty()) raw = rawMessage == null ? "" : rawMessage.trim();
-            Matcher matcher = Pattern.compile(
-                    "(?i)bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
-            ).matcher(raw);
-            if (matcher.find()) move = matcher.group(1);
+            if (isUciMove(raw)) {
+                move = raw;
+            } else {
+                if (raw.isEmpty()) raw = rawMessage == null ? "" : rawMessage.trim();
+                Matcher matcher = Pattern.compile(
+                        "(?i)bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+                ).matcher(raw);
+                if (matcher.find()) move = matcher.group(1);
+            }
         }
         return isUciMove(move) ? move.toLowerCase(java.util.Locale.US) : "";
     }
@@ -1496,10 +1500,14 @@ public final class ChessAssistantPatch {
         if (!isUciMove(move)) move = json.optString("uci", "").trim();
         if (!isUciMove(move)) {
             String bestMoveField = json.optString("bestmove", "").trim();
-            Matcher matcher = Pattern.compile(
-                    "(?i)bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
-            ).matcher(bestMoveField);
-            if (matcher.find()) move = matcher.group(1);
+            if (isUciMove(bestMoveField)) {
+                move = bestMoveField;
+            } else {
+                Matcher matcher = Pattern.compile(
+                        "(?i)bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+                ).matcher(bestMoveField);
+                if (matcher.find()) move = matcher.group(1);
+            }
         }
         if (!isUciMove(move)) {
             String from = json.optString("from", "").trim();
