@@ -861,9 +861,6 @@ public final class ChessAssistantPatch {
 
         CandidateMove first = deep.candidates[0];
         CandidateMove second = deep.candidates.length > 1 ? deep.candidates[1] : null;
-
-        // If the deep provider returns only its final best line, use the quick pass's
-        // other line for comparison instead of silently disabling special detection.
         if (second == null && normal != null) {
             for (CandidateMove candidate : normal) {
                 if (candidate != null && !candidate.move.equalsIgnoreCase(first.move)) {
@@ -882,10 +879,17 @@ public final class ChessAssistantPatch {
                     "A busca profunda confirmou uma linha forçada de mate.");
         }
 
-        if (isLikelyMaterialSacrifice(fen, first.move)
-                && best >= -0.35 && (second == null || gap >= 0.25)) {
-            return new SpecialFinding(first, "SACRIFÍCIO COM COMPENSAÇÃO",
-                    "O motor confirma que o sacrifício mantém a posição competitiva ou vencedora.");
+        // Check all four deep lines: a sound sacrifice can be the second, third,
+        // or fourth engine choice while remaining close to the best evaluation.
+        for (CandidateMove candidate : deep.candidates) {
+            if (candidate == null) continue;
+            double candidateScore = candidate.scoreForMover();
+            double lossFromBest = best - candidateScore;
+            if (isLikelyMaterialSacrifice(fen, candidate.move)
+                    && candidateScore >= -0.35 && lossFromBest <= 0.75) {
+                return new SpecialFinding(candidate, "SACRIFÍCIO COM COMPENSAÇÃO",
+                        "A busca profunda confirma que o sacrifício mantém compensação suficiente.");
+            }
         }
 
         if (second != null && best >= -0.50 && next <= -1.10 && gap >= 0.75) {
@@ -900,7 +904,7 @@ public final class ChessAssistantPatch {
 
         if (normal != null && normal.length > 0) {
             double quickBest = normal[0].scoreForMover();
-            boolean differentMove = !first.move.equalsIgnoreCase(normal[0].move);
+            boolean firstIsDifferent = !first.move.equalsIgnoreCase(normal[0].move);
 
             if (best >= 0.85 && best - quickBest >= 0.65
                     && (second == null || gap >= 0.40)) {
@@ -908,10 +912,27 @@ public final class ChessAssistantPatch {
                         "A análise rápida não identificou a força desta linha; a busca profunda confirmou a continuação.");
             }
 
-            if (differentMove && best >= 1.00
+            if (firstIsDifferent && best >= 1.00
                     && (second == null || gap >= 0.40)) {
                 return new SpecialFinding(first, "OPORTUNIDADE BRILHANTE",
-                        "A busca profunda encontrou uma jogada excepcional que não aparecia como primeira opção na análise rápida.");
+                        "A busca profunda encontrou uma jogada excepcional fora da primeira escolha superficial.");
+            }
+
+            for (CandidateMove candidate : deep.candidates) {
+                if (candidate == null) continue;
+                double candidateScore = candidate.scoreForMover();
+                double lossFromBest = best - candidateScore;
+                boolean wasInQuickLines = false;
+                for (CandidateMove quick : normal) {
+                    if (quick != null && quick.move.equalsIgnoreCase(candidate.move)) {
+                        wasInQuickLines = true;
+                        break;
+                    }
+                }
+                if (!wasInQuickLines && candidateScore >= 0.90 && lossFromBest <= 0.30) {
+                    return new SpecialFinding(candidate, "OPORTUNIDADE BRILHANTE",
+                            "A busca profunda encontrou uma continuação excepcional que não apareceu entre as linhas rápidas.");
+                }
             }
         }
 
@@ -1129,10 +1150,15 @@ public final class ChessAssistantPatch {
             CandidateMove best = found.get(0).withLabel("EXCELENTE");
             ArrayList<CandidateMove> selected = new ArrayList<>();
             selected.add(best);
-            if (found.size() > 1) {
-                CandidateMove second = found.get(1);
-                double loss = best.scoreForMover() - second.scoreForMover();
-                selected.add(second.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+            for (int i = 1; i < found.size(); i++) {
+                CandidateMove alternative = found.get(i);
+                if (i == 1) {
+                    double loss = best.scoreForMover() - alternative.scoreForMover();
+                    selected.add(alternative.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+                } else {
+                    // Retain third/fourth deep lines for special-move classification.
+                    selected.add(alternative.withLabel("ANÁLISE PROFUNDA"));
+                }
             }
 
             CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
@@ -1303,11 +1329,15 @@ public final class ChessAssistantPatch {
             CandidateMove best = found.get(0).withLabel("EXCELENTE");
             ArrayList<CandidateMove> selected = new ArrayList<>();
             selected.add(best);
-
-            if (found.size() > 1) {
-                CandidateMove second = found.get(1);
-                double loss = best.scoreForMover() - second.scoreForMover();
-                selected.add(second.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+            for (int i = 1; i < found.size(); i++) {
+                CandidateMove alternative = found.get(i);
+                if (i == 1) {
+                    double loss = best.scoreForMover() - alternative.scoreForMover();
+                    selected.add(alternative.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+                } else {
+                    // Retain third/fourth deep lines for special-move classification.
+                    selected.add(alternative.withLabel("ANÁLISE PROFUNDA"));
+                }
             }
 
             CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
