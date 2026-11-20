@@ -1060,17 +1060,19 @@ public final class ChessAssistantPatch {
     }
 
     private static EngineResult fetchAnalysis(String fen) {
-        EngineResult multiPv = fetchChessApi(fen);
-        if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
-
-        // The REST endpoint returns the completed result instead of a progressive
-        // stream, so it is a useful second path when the WebSocket is unavailable.
+        // Restore the completed HTTP response as the primary path. Its top-level
+        // "move" field is the provider's declared best move; do not let a later
+        // MultiPV sorting pass replace it with another candidate.
         EngineResult rest = fetchChessApiHttp(
                 fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS
         );
         if (rest.error == null && rest.candidates.length > 0) return rest;
 
-        // Preserve the original Stockfish Online provider as the last fallback.
+        // Keep the progressive WebSocket path as a fallback only.
+        EngineResult multiPv = fetchChessApi(fen);
+        if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
+
+        // Preserve the previous Stockfish Online endpoint as the final fallback.
         EngineResult fallback = fetchStockfish(fen);
         if (fallback.error == null && !fallback.bestMove.isEmpty()) {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
@@ -1082,11 +1084,11 @@ public final class ChessAssistantPatch {
                     null, new CandidateMove[]{single});
         }
 
-        String primaryError = multiPv.error == null ? "nenhuma variante recebida" : multiPv.error;
         String restError = rest.error == null ? "nenhuma jogada no retorno REST" : rest.error;
+        String primaryError = multiPv.error == null ? "nenhuma variante recebida" : multiPv.error;
         String fallbackError = fallback.error == null ? "o serviço não retornou uma jogada" : fallback.error;
-        return EngineResult.error("WebSocket: " + primaryError
-                + " | REST: " + restError + " | Reserva: " + fallbackError);
+        return EngineResult.error("REST: " + restError
+                + " | WebSocket: " + primaryError + " | Reserva: " + fallbackError);
     }
 
     private static EngineResult fetchChessApiHttp(String fen, int depth, int variants,
@@ -1137,8 +1139,12 @@ public final class ChessAssistantPatch {
             }
 
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
+            // In the completed REST response, top-level "move" is the API's
+            // authoritative best move. Preserve it before collecting/sorting variants.
+            CandidateMove declaredBest = parseCandidate(json, whiteToMove, depth);
             ArrayList<CandidateMove> found = new ArrayList<>();
             collectCandidatePayload(json, whiteToMove, found, depth);
+            if (declaredBest != null) addOrUpdateCandidate(found, declaredBest);
             if (found.isEmpty()) {
                 return EngineResult.error(json.optString("text", "o serviço REST não retornou uma jogada válida"));
             }
@@ -1147,18 +1153,21 @@ public final class ChessAssistantPatch {
                     Double.compare(right.scoreForMover(), left.scoreForMover()));
             while (found.size() > variants) found.remove(found.size() - 1);
 
-            CandidateMove best = found.get(0).withLabel("EXCELENTE");
+            CandidateMove best = declaredBest == null ? found.get(0) : declaredBest;
             ArrayList<CandidateMove> selected = new ArrayList<>();
-            selected.add(best);
-            for (int i = 1; i < found.size(); i++) {
-                CandidateMove alternative = found.get(i);
-                if (i == 1) {
-                    double loss = best.scoreForMover() - alternative.scoreForMover();
-                    selected.add(alternative.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
-                } else {
-                    // Retain third/fourth deep lines for special-move classification.
-                    selected.add(alternative.withLabel("ANÁLISE PROFUNDA"));
+            selected.add(best.withLabel("EXCELENTE"));
+
+            // The second line is the strongest remaining distinct alternative.
+            CandidateMove second = null;
+            for (CandidateMove candidate : found) {
+                if (candidate != null && !candidate.move.equalsIgnoreCase(best.move)) {
+                    second = candidate;
+                    break;
                 }
+            }
+            if (second != null) {
+                double loss = best.scoreForMover() - second.scoreForMover();
+                selected.add(second.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
             }
 
             CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
