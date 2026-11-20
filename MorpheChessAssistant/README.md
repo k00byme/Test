@@ -2,45 +2,41 @@
 
 Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.chess`).
 
-## Supported game screens
+## Supported screens
 
-- **Online games:** hooks the general `RealGameActivity` used by Chess.com's online game flow. This includes formats that route through that screen, such as live games and other online game types supported by this app version.
-- **Play vs Bots:** hooks the dedicated `BotGameActivityV2` used for Chess.com's bot games, including games started from the app's online/offline bot flow.
-- **Standalone analysis:** hooks `StandaloneAnalysisActivityV2` for analysis and review.
+- **Play vs Bots:** `BotGameActivityV2`. The optional AUTO control is available only here.
+- **Standalone analysis:** `StandaloneAnalysisActivityV2`.
+- **Human live games:** not hooked by this build.
 
-The game-mode coverage is based on the activities and board classes recovered from Chess.com Android 4.10.28. Game formats using another, separate Activity not listed above are not confirmed by this build.
+## Move assistance
 
-## Visual features
+- Stockfish evaluation panel.
+- Up to two MultiPV candidate moves: the engine's top line and its second line.
+- Green arrow for the top line; yellow arrow for the second line.
+- Blue origin-square highlight and destination highlight matching each arrow.
+- No third / worst-move suggestion, badges, or text labels.
+- Board orientation handling and stale-overlay clearing.
 
-- Stockfish score/evaluation panel.
-- Up to three candidate moves from a MultiPV analysis: **best**, **good/medium**, and **least favorable**.
-- Three colored arrows drawn over the native board, with text badges that identify each move and show its evaluation.
-- The least favorable candidate is labeled **RUIM** only when its evaluation is at least 1.20 pawns worse than the best line, or it allows a forced mate against the side to move. Otherwise it is labeled **MENOS BOA** to avoid misclassifying a reasonable move.
-- Blue highlight on the best move's origin square and green highlight on its destination.
-- Board orientation handling for flipped and normal views.
-- Old arrows/highlights are cleared when the position changes or the board disappears.
-- The extension never moves a piece, clicks a square, or sends a move to Chess.com.
+The MultiPV request now asks for two lines instead of five, uses a lower depth and a shorter thinking budget, returns when both distinct first moves arrive, and polls the board more frequently. This is intended to reduce latency; actual timing still depends on network conditions and the external service.
+
+## Automatic play against bots
+
+The bot-game screen has a separate **AUTO ON/OFF** control positioned outside the board. It starts disabled and can be toggled during a game.
+
+When enabled, it waits for the human player's turn and selects the engine's best line most of the time, choosing the second line approximately once in five moves. It never selects a third or deliberately bad line. Automatic input is sent only to the native board view in `BotGameActivityV2`; it is not injected into live games against human opponents.
+
+The player's color is read from exposed activity/board metadata when available, with board orientation as a fallback. The control is hidden if no free area exists around the board where it can be displayed without covering squares.
 
 ## Engine connectivity and privacy
 
-The extension first sends the board FEN to `https://chess-api.com/v1` over HTTPS, requesting up to five MultiPV variations at depth 12. It uses the first, second and least favorable of the returned candidate lines for the three labels. If that service is unavailable, it falls back to `https://stockfish.online/api/s/v2.php`, which provides a single best move rather than MultiPV alternatives.
+The extension uses `https://chess-api.com/v1` over WebSocket for two MultiPV lines. If that service fails completely, it falls back to `https://stockfish.online/api/s/v2.php`, which provides one best move. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
 
-An internet connection is required for each new position. The patch does not include an on-device Stockfish engine. The FEN position is sent to the external analysis provider; do not use it with private positions if you do not want their FEN sent to those services.
+## Compatibility and build
 
-## Compatibility
+Only Chess.com Android `4.10.28-googleplay` is declared as supported. The XAPK file type is declared because the app is distributed as an XAPK split bundle.
 
-Only Chess.com Android `4.10.28-googleplay` is declared as a supported target. The XAPK file type is declared because the app package is distributed as an XAPK split bundle. Other app versions are untested.
-
-## Build
-
-The GitHub Actions workflow **Build Morphe Chess Assistant** builds the `.mpp` file and uploads it as an artifact. To build locally with the Morphe toolchain installed, run:
-
-```bash
-gradle buildAndroid
-```
-
-The output is in `patches/build/libs/`.
+The GitHub Actions workflow **Build Morphe Chess Assistant** runs `gradle buildAndroid` and uploads the generated `.mpp` artifact. The output is in `patches/build/libs/`.
 
 ## Verification status
 
-The target APK structure was inspected, and the patch bundle was compiled successfully by GitHub Actions. The generated `.mpp` archive passed an integrity check. Runtime rendering and live MultiPV responses still need confirmation on an Android device with this Chess.com version; successful compilation alone does not prove that the overlay renders correctly or that the external API returns multiple candidate lines for every position.
+The patch source is compiled by GitHub Actions. Automatic touch delivery, control placement, candidate timing, and bot-side color detection still require runtime confirmation on an Android device. Successful compilation alone does not prove that the app accepts the injected touch events in every bot-game layout.

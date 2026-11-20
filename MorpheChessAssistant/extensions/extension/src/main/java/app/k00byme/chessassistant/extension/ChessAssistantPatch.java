@@ -11,8 +11,10 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Base64;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -47,6 +49,7 @@ import javax.net.ssl.SSLSocketFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -66,9 +69,10 @@ public final class ChessAssistantPatch {
     private static final String CHESS_API_HOST = "chess-api.com";
     private static final String CHESS_API_PATH = "/v1";
     private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
-    private static final int ENGINE_DEPTH = 12;
-    private static final int ENGINE_VARIANTS = 5;
-    private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
+    private static final int ENGINE_DEPTH = 10;
+    private static final int ENGINE_VARIANTS = 2;
+    private static final int ENGINE_MAX_THINKING_TIME_MS = 80;
+    private static final long BOARD_POLL_INTERVAL_MS = 350L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private ChessAssistantPatch() {}
@@ -78,8 +82,7 @@ public final class ChessAssistantPatch {
         if (activity == null) return;
         String activityName = activity.getClass().getName();
         boolean supported = "com.chess.features.versusbots.game.BotGameActivityV2".equals(activityName)
-                || "com.chess.features.analysis.standalonev2.StandaloneAnalysisActivityV2".equals(activityName)
-                || "com.chess.realchess.ui.game.RealGameActivity".equals(activityName);
+                || "com.chess.features.analysis.standalonev2.StandaloneAnalysisActivityV2".equals(activityName);
         if (!supported) return;
 
         // onCreate is hooked before the app creates its content view, so defer installation.
@@ -108,10 +111,13 @@ public final class ChessAssistantPatch {
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final TextView panel;
         private final BoardDrawing drawing;
+        private final boolean botGame;
+        private final TextView autoButton;
+        private final Random autoSelector = new Random();
         private final Runnable poller = new Runnable() {
             @Override public void run() {
                 scanAndAnalyze();
-                if (isAttachedToWindow()) handler.postDelayed(this, 1200L);
+                if (isAttachedToWindow()) handler.postDelayed(this, BOARD_POLL_INTERVAL_MS);
             }
         };
 
@@ -124,10 +130,14 @@ public final class ChessAssistantPatch {
         private int mate = 0;
         private CandidateMove[] candidates = new CandidateMove[0];
         private View boardView;
+        private boolean autoEnabled;
+        private boolean autoMoveInProgress;
+        private String lastAutoFen = "";
 
         AnalysisOverlay(Activity activity) {
             super(activity);
             activityRef = new WeakReference<>(activity);
+            botGame = "com.chess.features.versusbots.game.BotGameActivityV2".equals(activity.getClass().getName());
             setClipChildren(false);
             setClipToPadding(false);
             setClickable(false);
@@ -165,6 +175,35 @@ public final class ChessAssistantPatch {
             panelParams.rightMargin = margin;
             addView(panel, panelParams);
 
+            if (botGame) {
+                autoButton = new TextView(activity);
+                autoButton.setTextSize(12.5f);
+                autoButton.setTypeface(Typeface.create("sans-serif-bold", Typeface.NORMAL));
+                autoButton.setTextColor(0xFFFFFFFF);
+                autoButton.setGravity(Gravity.CENTER);
+                autoButton.setPadding(dp(activity, 16), dp(activity, 9), dp(activity, 16), dp(activity, 9));
+                autoButton.setMinHeight(dp(activity, 38));
+                autoButton.setElevation(dp(activity, 7));
+                autoButton.setClickable(true);
+                autoButton.setFocusable(true);
+                addView(autoButton, new FrameLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.CENTER_HORIZONTAL
+                ));
+                updateAutoButton();
+                autoButton.setOnClickListener(view -> {
+                    autoEnabled = !autoEnabled;
+                    updateAutoButton();
+                    if (autoEnabled) {
+                        setStatus("AUTO ligada — aguardando sua vez.");
+                        maybeAutoMove(activeFen);
+                    } else {
+                        setStatus("AUTO desligada.");
+                    }
+                });
+            } else {
+                autoButton = null;
+            }
         }
 
         @Override protected void onAttachedToWindow() {
@@ -208,13 +247,16 @@ public final class ChessAssistantPatch {
             }
 
             drawing.setBoard(found);
+            positionAutoButton(found);
             if (!fen.equals(activeFen)) {
                 activeFen = fen;
+                autoMoveInProgress = false;
                 clearAnalysis();
             }
 
             if (!fen.equals(requestedFen) && !requestInFlight) requestAnalysis(fen);
             drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(found));
+            if (autoEnabled) maybeAutoMove(fen);
         }
 
         private void clearAnalysis() {
@@ -228,7 +270,7 @@ public final class ChessAssistantPatch {
         private void requestAnalysis(final String fen) {
             requestedFen = fen;
             requestInFlight = true;
-            setStatus("Stockfish analisando cinco alternativas…");
+            setStatus("Stockfish analisando duas alternativas…");
             try {
                 worker.execute(() -> {
                     EngineResult result = fetchAnalysis(fen);
@@ -257,16 +299,197 @@ public final class ChessAssistantPatch {
                         String evalText = result.mate != 0
                                 ? "Mate em " + result.mate
                                 : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
-                        String mode = candidates.length >= 3 ? "3 opções" : candidates.length + " opção(ões)";
+                        String mode = candidates.length >= 2 ? "2 opções" : candidates.length + " opção(ões)";
                         setStatus("STOCKFISH 18  •  profundidade " + ENGINE_DEPTH
                                 + "\nAvaliação: " + evalText
                                 + "\n" + mode);
                         drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(boardView));
+                        if (autoEnabled) maybeAutoMove(fen);
                     });
                 });
             } catch (RuntimeException ex) {
                 requestInFlight = false;
                 setStatus("Não foi possível iniciar a análise.");
+            }
+        }
+
+
+        private void updateAutoButton() {
+            if (autoButton == null) return;
+            autoButton.setText(autoEnabled ? "AUTO  •  LIGADA" : "AUTO  •  DESLIGADA");
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(autoEnabled ? 0xFF81B64C : 0xFF3B414B);
+            background.setCornerRadius(dp(getContext(), 18));
+            background.setStroke(dp(getContext(), 1), autoEnabled ? 0xFFB7DB8A : 0xFF68717E);
+            autoButton.setBackground(background);
+        }
+
+        /** Place the control in free space around the board; never cover a square. */
+        private void positionAutoButton(View board) {
+            if (autoButton == null || board == null || getWidth() <= 0 || getHeight() <= 0) return;
+
+            autoButton.measure(
+                    View.MeasureSpec.makeMeasureSpec(getWidth(), View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(getHeight(), View.MeasureSpec.AT_MOST)
+            );
+            int buttonWidth = autoButton.getMeasuredWidth();
+            int buttonHeight = autoButton.getMeasuredHeight();
+            int margin = dp(getContext(), 8);
+
+            int[] boardLocation = new int[2];
+            int[] overlayLocation = new int[2];
+            board.getLocationOnScreen(boardLocation);
+            getLocationOnScreen(overlayLocation);
+
+            float boardSize = Math.min(board.getWidth(), board.getHeight());
+            float boardLeft = boardLocation[0] - overlayLocation[0]
+                    + (board.getWidth() - boardSize) / 2.0f;
+            float boardTop = boardLocation[1] - overlayLocation[1]
+                    + (board.getHeight() - boardSize) / 2.0f;
+            float boardRight = boardLeft + boardSize;
+            float boardBottom = boardTop + boardSize;
+
+            int topSpace = Math.max(0, (int) boardTop - margin);
+            int bottomSpace = Math.max(0, getHeight() - (int) boardBottom - margin);
+            int leftSpace = Math.max(0, (int) boardLeft - margin);
+            int rightSpace = Math.max(0, getWidth() - (int) boardRight - margin);
+
+            FrameLayout.LayoutParams params;
+            if (topSpace >= buttonHeight) {
+                params = new FrameLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.CENTER_HORIZONTAL
+                );
+                params.topMargin = Math.max(0, (topSpace - buttonHeight) / 2);
+            } else if (bottomSpace >= buttonHeight) {
+                params = new FrameLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.CENTER_HORIZONTAL
+                );
+                params.topMargin = (int) boardBottom + (bottomSpace - buttonHeight) / 2;
+            } else if (leftSpace >= buttonWidth) {
+                params = new FrameLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.START
+                );
+                params.leftMargin = Math.max(0, (leftSpace - buttonWidth) / 2);
+                params.topMargin = Math.max(0, (int) (boardTop + (boardSize - buttonHeight) / 2));
+            } else if (rightSpace >= buttonWidth) {
+                params = new FrameLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.END
+                );
+                params.rightMargin = Math.max(0, (rightSpace - buttonWidth) / 2);
+                params.topMargin = Math.max(0, (int) (boardTop + (boardSize - buttonHeight) / 2));
+            } else {
+                autoButton.setVisibility(View.GONE);
+                return;
+            }
+
+            autoButton.setLayoutParams(params);
+            autoButton.setVisibility(View.VISIBLE);
+        }
+
+        private void maybeAutoMove(final String fen) {
+            if (!botGame || !autoEnabled || autoMoveInProgress || closed
+                    || !isAttachedToWindow() || boardView == null
+                    || !isFen(fen) || !fen.equals(activeFen)
+                    || candidates.length == 0 || fen.equals(lastAutoFen)) return;
+
+            Activity activity = activityRef.get();
+            Boolean playerIsWhite = readPlayerColor(activity, boardView);
+            if (playerIsWhite == null) return;
+
+            boolean whiteToMove = "w".equals(fen.split("\\s+")[1]);
+            if (whiteToMove != playerIsWhite) return;
+
+            // Prefer the top engine line; choose the second line approximately once in five turns.
+            CandidateMove selected = candidates[0];
+            if (candidates.length > 1 && autoSelector.nextInt(5) == 0) {
+                selected = candidates[1];
+            }
+            if (!isUciMove(selected.move)) return;
+
+            final CandidateMove move = selected;
+            final View targetBoard = boardView;
+            final boolean flipped = isBoardFlipped(targetBoard);
+            lastAutoFen = fen;
+            autoMoveInProgress = true;
+
+            handler.postDelayed(() -> {
+                if (!autoEnabled || closed || !isAttachedToWindow()
+                        || !fen.equals(activeFen) || targetBoard != boardView
+                        || !targetBoard.isShown()) {
+                    autoMoveInProgress = false;
+                    return;
+                }
+
+                if (!dispatchAutomaticMove(targetBoard, move.move, flipped, fen)) {
+                    autoMoveInProgress = false;
+                    setStatus("AUTO: não foi possível acionar o tabuleiro.");
+                    return;
+                }
+
+                setStatus("AUTO: jogada selecionada pela análise.");
+                handler.postDelayed(() -> autoMoveInProgress = false, 450L);
+            }, 220L);
+        }
+
+        private boolean dispatchAutomaticMove(View board, String move, boolean flipped, String fen) {
+            if (board == null || !isUciMove(move) || !fen.equals(activeFen)) return false;
+            float[] from = squareCenter(board, move.substring(0, 2), flipped);
+            float[] to = squareCenter(board, move.substring(2, 4), flipped);
+            if (from == null || to == null) return false;
+
+            final long[] firstDown = {0L};
+            final long[] secondDown = {0L};
+            handler.postDelayed(() -> {
+                if (!fen.equals(activeFen) || board != boardView) return;
+                firstDown[0] = SystemClock.uptimeMillis();
+                dispatchBoardTouch(board, MotionEvent.ACTION_DOWN, firstDown[0], from[0], from[1]);
+            }, 20L);
+            handler.postDelayed(() -> {
+                if (firstDown[0] == 0L) return;
+                dispatchBoardTouch(board, MotionEvent.ACTION_UP, firstDown[0], from[0], from[1]);
+            }, 75L);
+            handler.postDelayed(() -> {
+                if (firstDown[0] == 0L || !fen.equals(activeFen) || board != boardView) return;
+                secondDown[0] = SystemClock.uptimeMillis();
+                dispatchBoardTouch(board, MotionEvent.ACTION_DOWN, secondDown[0], to[0], to[1]);
+            }, 145L);
+            handler.postDelayed(() -> {
+                if (secondDown[0] == 0L) return;
+                dispatchBoardTouch(board, MotionEvent.ACTION_UP, secondDown[0], to[0], to[1]);
+            }, 205L);
+            return true;
+        }
+
+        private float[] squareCenter(View board, String square, boolean flipped) {
+            if (board == null || square == null || square.length() != 2
+                    || square.charAt(0) < 'a' || square.charAt(0) > 'h'
+                    || square.charAt(1) < '1' || square.charAt(1) > '8') return null;
+            float size = Math.min(board.getWidth(), board.getHeight());
+            if (size <= 0f) return null;
+            float squareSize = size / 8.0f;
+            int file = square.charAt(0) - 'a';
+            int rank = square.charAt(1) - '1';
+            int column = flipped ? 7 - file : file;
+            int row = flipped ? rank : 7 - rank;
+            float left = (board.getWidth() - size) / 2.0f;
+            float top = (board.getHeight() - size) / 2.0f;
+            return new float[] {
+                    left + (column + 0.5f) * squareSize,
+                    top + (row + 0.5f) * squareSize
+            };
+        }
+
+        private void dispatchBoardTouch(View board, int action, long downTime, float x, float y) {
+            long eventTime = SystemClock.uptimeMillis();
+            MotionEvent event = MotionEvent.obtain(downTime, eventTime, action, x, y, 0);
+            try {
+                board.dispatchTouchEvent(event);
+            } finally {
+                event.recycle();
             }
         }
 
@@ -422,6 +645,88 @@ public final class ChessAssistantPatch {
         return false;
     }
 
+
+    /** Resolve the human side from game metadata when possible; board orientation is the fallback. */
+    private static Boolean readPlayerColor(Activity activity, View board) {
+        Boolean value = playerColorFromObject(activity);
+        if (value != null) return value;
+        value = playerColorFromObject(board);
+        if (value != null) return value;
+        return board == null ? null : !isBoardFlipped(board);
+    }
+
+    private static Boolean playerColorFromObject(Object target) {
+        if (target == null) return null;
+        String[] colorGetters = {
+                "getPlayerColor", "getUserColor", "getMyColor",
+                "getPlayerSide", "getUserSide", "getPlayingColor"
+        };
+        for (String name : colorGetters) {
+            try {
+                Method method = target.getClass().getMethod(name);
+                if (method.getParameterTypes().length != 0) continue;
+                Boolean parsed = parsePlayerColor(method.invoke(target));
+                if (parsed != null) return parsed;
+            } catch (Throwable ignored) {
+                // Continue through version-specific metadata accessors.
+            }
+        }
+        String[] whiteGetters = {"isWhitePlayer", "isPlayerWhite", "getIsWhitePlayer", "isWhiteSide"};
+        for (String name : whiteGetters) {
+            try {
+                Method method = target.getClass().getMethod(name);
+                if (method.getParameterTypes().length == 0) {
+                    Object result = method.invoke(target);
+                    if (result instanceof Boolean) return (Boolean) result;
+                }
+            } catch (Throwable ignored) {
+                // Continue through the available metadata.
+            }
+        }
+        String[] blackGetters = {"isBlackPlayer", "isPlayerBlack", "getIsBlackPlayer", "isBlackSide"};
+        for (String name : blackGetters) {
+            try {
+                Method method = target.getClass().getMethod(name);
+                if (method.getParameterTypes().length == 0) {
+                    Object result = method.invoke(target);
+                    if (result instanceof Boolean) return !((Boolean) result);
+                }
+            } catch (Throwable ignored) {
+                // Continue through the available metadata.
+            }
+        }
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                String name = field.getName().toLowerCase(java.util.Locale.US);
+                if (!(name.contains("playercolor") || name.contains("usercolor")
+                        || name.contains("mycolor") || name.contains("playerside")
+                        || name.contains("userside") || name.equals("iswhiteplayer")
+                        || name.equals("isblackplayer"))) continue;
+                try {
+                    field.setAccessible(true);
+                    Object result = field.get(target);
+                    if (result instanceof Boolean && name.contains("white")) return (Boolean) result;
+                    if (result instanceof Boolean && name.contains("black")) return !((Boolean) result);
+                    Boolean parsed = parsePlayerColor(result);
+                    if (parsed != null) return parsed;
+                } catch (Throwable ignored) {
+                    // Ignore unavailable obfuscated fields.
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Boolean parsePlayerColor(Object value) {
+        if (value == null) return null;
+        String text = String.valueOf(value).trim().toLowerCase(java.util.Locale.US);
+        if ("white".equals(text) || "w".equals(text) || "light".equals(text)
+                || text.endsWith(".white")) return true;
+        if ("black".equals(text) || "b".equals(text) || "dark".equals(text)
+                || text.endsWith(".black")) return false;
+        return null;
+    }
+
     private static boolean isFen(String fen) {
         if (fen == null || fen.isEmpty() || fen.length() > 120) return false;
         String[] fields = fen.split("\\s+");
@@ -459,8 +764,8 @@ public final class ChessAssistantPatch {
         SSLSocket socket = null;
         try {
             socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
-            socket.connect(new InetSocketAddress(CHESS_API_HOST, 443), 8000);
-            socket.setSoTimeout(16000);
+            socket.connect(new InetSocketAddress(CHESS_API_HOST, 443), 5000);
+            socket.setSoTimeout(6000);
 
             BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
@@ -504,7 +809,7 @@ public final class ChessAssistantPatch {
 
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
             ArrayList<CandidateMove> found = new ArrayList<>();
-            long deadline = System.currentTimeMillis() + 15500L;
+            long deadline = System.currentTimeMillis() + 6000L;
 
             while (System.currentTimeMillis() < deadline) {
                 String message;
@@ -538,9 +843,9 @@ public final class ChessAssistantPatch {
 
                 collectCandidatePayload(json, whiteToMove, found);
 
-                // Keep collecting and refreshing unique move candidates until the
-                // service marks the analysis complete with its final bestmove event.
-                if ("bestmove".equals(type)) break;
+                // Request only two lines and return as soon as both distinct first moves arrive.
+                // This avoids waiting for deeper refinement of a third, weaker alternative.
+                if (found.size() >= ENGINE_VARIANTS || "bestmove".equals(type)) break;
             }
 
             if (found.isEmpty()) {
@@ -554,23 +859,12 @@ public final class ChessAssistantPatch {
             // are retained so all arrows can be drawn simultaneously on the board.
             while (found.size() > ENGINE_VARIANTS) found.remove(found.size() - 1);
 
-            CandidateMove best = found.get(0).withLabel("MELHOR");
+            CandidateMove best = found.get(0).withLabel("EXCELENTE");
             ArrayList<CandidateMove> selected = new ArrayList<>();
             selected.add(best);
 
             if (found.size() > 1) {
-                CandidateMove good = found.get(1);
-                double loss = best.scoreForMover() - good.scoreForMover();
-                selected.add(good.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
-            }
-
-            if (found.size() > 2) {
-                CandidateMove lessFavorable = found.get(found.size() - 1);
-                double loss = best.scoreForMover() - lessFavorable.scoreForMover();
-                boolean clearlyBad = loss >= 1.20
-                        || (lessFavorable.mate != 0
-                        && (whiteToMove ? lessFavorable.mate < 0 : lessFavorable.mate > 0));
-                selected.add(lessFavorable.withLabel(clearlyBad ? "RUIM" : "MENOS BOA"));
+                selected.add(found.get(1).withLabel("MEDIANA"));
             }
 
             CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
@@ -764,8 +1058,8 @@ public final class ChessAssistantPatch {
             URL url = new URL(STOCKFISH_URL + "?" + query);
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(8000);
-            connection.setReadTimeout(10000);
+            connection.setConnectTimeout(4000);
+            connection.setReadTimeout(5000);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/1.0");
 

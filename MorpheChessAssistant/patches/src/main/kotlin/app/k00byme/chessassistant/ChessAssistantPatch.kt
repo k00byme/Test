@@ -64,7 +64,5 @@ val chessAssistantPatch = patch(
         // Dedicated Chess.com Play-vs-Bots activity.
         hookActivity("Lcom/chess/features/versusbots/game/BotGameActivityV2;")
 
-        // Main activity used by Chess.com's online human games and game formats.
-        hookActivity("Lcom/chess/realchess/ui/game/RealGameActivity;")
     }
 }
