@@ -38,6 +38,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -133,6 +134,9 @@ public final class ChessAssistantPatch {
 
         private volatile boolean requestInFlight;
         private volatile boolean closed;
+        private String failedFen = "";
+        private int connectionFailureCount;
+        private long retryAfterElapsedRealtime;
         private String requestedFen = "";
         private String activeFen = "";
         private String bestMove = "";
@@ -247,6 +251,9 @@ public final class ChessAssistantPatch {
                 if (autoButton != null) autoButton.setVisibility(View.GONE);
                 activeFen = "";
                 requestedFen = "";
+                failedFen = "";
+                connectionFailureCount = 0;
+                retryAfterElapsedRealtime = 0L;
                 clearAnalysis();
                 drawing.setBoard(null);
                 setStatus("Aguardando o tabuleiro do jogo…");
@@ -259,6 +266,9 @@ public final class ChessAssistantPatch {
                 if (autoButton != null) autoButton.setVisibility(View.GONE);
                 activeFen = "";
                 requestedFen = "";
+                failedFen = "";
+                connectionFailureCount = 0;
+                retryAfterElapsedRealtime = 0L;
                 clearAnalysis();
                 drawing.setBoard(found);
                 setStatus("Aguardando uma posição válida do tabuleiro…");
@@ -273,7 +283,10 @@ public final class ChessAssistantPatch {
                 clearAnalysis();
             }
 
-            if (!fen.equals(requestedFen) && !requestInFlight) requestAnalysis(fen);
+            long now = SystemClock.elapsedRealtime();
+            boolean positionChanged = !fen.equals(requestedFen);
+            boolean retryDue = fen.equals(failedFen) && now >= retryAfterElapsedRealtime;
+            if (!requestInFlight && (positionChanged || retryDue)) requestAnalysis(fen);
             drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(found));
             if (autoEnabled) maybeAutoMove(fen);
         }
@@ -292,6 +305,11 @@ public final class ChessAssistantPatch {
         }
 
         private void requestAnalysis(final String fen) {
+            if (!fen.equals(failedFen)) {
+                failedFen = "";
+                connectionFailureCount = 0;
+                retryAfterElapsedRealtime = 0L;
+            }
             requestedFen = fen;
             requestInFlight = true;
             setStatus("Stockfish analisando duas alternativas…");
@@ -311,10 +329,20 @@ public final class ChessAssistantPatch {
 
                         if (result.error != null) {
                             clearAnalysis();
-                            setStatus("Análise indisponível: " + result.error);
+                            failedFen = fen;
+                            connectionFailureCount = Math.min(connectionFailureCount + 1, 4);
+                            long retryDelayMs = connectionFailureCount == 1 ? 3000L
+                                    : connectionFailureCount == 2 ? 6000L
+                                    : connectionFailureCount == 3 ? 12000L : 30000L;
+                            retryAfterElapsedRealtime = SystemClock.elapsedRealtime() + retryDelayMs;
+                            setStatus("Conexão indisponível: " + result.error
+                                    + "\\nNova tentativa em " + (retryDelayMs / 1000L) + " s.");
                             return;
                         }
 
+                        failedFen = "";
+                        connectionFailureCount = 0;
+                        retryAfterElapsedRealtime = 0L;
                         bestMove = result.bestMove;
                         evaluation = result.evaluation;
                         mate = result.mate;
@@ -832,20 +860,21 @@ public final class ChessAssistantPatch {
 
 
     private static EngineResult fetchSpecialAnalysis(String fen) {
-        EngineResult result = fetchChessApi(
+        // Prefer standard HTTPS; the custom WebSocket is only a fallback.
+        EngineResult result = fetchChessApiHttp(
                 fen,
                 SPECIAL_ENGINE_DEPTH,
                 SPECIAL_ENGINE_VARIANTS,
-                SPECIAL_ENGINE_MAX_THINKING_TIME_MS,
-                SPECIAL_ENGINE_TIMEOUT_MS,
-                true
+                SPECIAL_ENGINE_MAX_THINKING_TIME_MS
         );
         if (result.error != null || result.candidates.length == 0) {
-            result = fetchChessApiHttp(
+            result = fetchChessApi(
                     fen,
                     SPECIAL_ENGINE_DEPTH,
                     SPECIAL_ENGINE_VARIANTS,
-                    SPECIAL_ENGINE_MAX_THINKING_TIME_MS
+                    SPECIAL_ENGINE_MAX_THINKING_TIME_MS,
+                    SPECIAL_ENGINE_TIMEOUT_MS,
+                    true
             );
         }
         if (result.error != null) return result;
@@ -854,6 +883,7 @@ public final class ChessAssistantPatch {
         }
         return result;
     }
+
 
     private static SpecialFinding findSpecialFinding(String fen, CandidateMove[] normal,
                                                      EngineResult deep) {
@@ -1060,19 +1090,14 @@ public final class ChessAssistantPatch {
     }
 
     private static EngineResult fetchAnalysis(String fen) {
-        // Restore the completed HTTP response as the primary path. Its top-level
-        // "move" field is the provider's declared best move; do not let a later
-        // MultiPV sorting pass replace it with another candidate.
+        // First use the Chess API REST endpoint for two evaluated lines.
         EngineResult rest = fetchChessApiHttp(
                 fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS
         );
         if (rest.error == null && rest.candidates.length > 0) return rest;
 
-        // Keep the progressive WebSocket path as a fallback only.
-        EngineResult multiPv = fetchChessApi(fen);
-        if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
-
-        // Preserve the previous Stockfish Online endpoint as the final fallback.
+        // Fail over immediately to a different provider, rather than waiting
+        // for another protocol connection to the same Chess API host.
         EngineResult fallback = fetchStockfish(fen);
         if (fallback.error == null && !fallback.bestMove.isEmpty()) {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
@@ -1084,12 +1109,20 @@ public final class ChessAssistantPatch {
                     null, new CandidateMove[]{single});
         }
 
+        // Last resort: try the WebSocket path with a correct TLS peer hostname.
+        EngineResult multiPv = fetchChessApi(
+                fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS, 7000L, true
+        );
+        if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
+
         String restError = rest.error == null ? "nenhuma jogada no retorno REST" : rest.error;
-        String primaryError = multiPv.error == null ? "nenhuma variante recebida" : multiPv.error;
         String fallbackError = fallback.error == null ? "o serviço não retornou uma jogada" : fallback.error;
-        return EngineResult.error("REST: " + restError
-                + " | WebSocket: " + primaryError + " | Reserva: " + fallbackError);
+        String socketError = multiPv.error == null ? "nenhuma variante recebida" : multiPv.error;
+        return EngineResult.error("Chess API REST: " + restError
+                + " | Stockfish Online: " + fallbackError
+                + " | Chess API WebSocket: " + socketError);
     }
+
 
     private static EngineResult fetchChessApiHttp(String fen, int depth, int variants,
                                                   int maxThinkingTimeMs) {
@@ -1208,9 +1241,16 @@ public final class ChessAssistantPatch {
                                               int maxThinkingTimeMs, long timeoutMs,
                                               boolean waitForFinal) {
         SSLSocket socket = null;
+        Socket transport = null;
         try {
-            socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
-            socket.connect(new InetSocketAddress(CHESS_API_HOST, 443), 5000);
+            transport = new Socket();
+            transport.setTcpNoDelay(true);
+            transport.connect(new InetSocketAddress(CHESS_API_HOST, 443), 5000);
+            SSLSocketFactory sslFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+            socket = (SSLSocket) sslFactory.createSocket(transport, CHESS_API_HOST, 443, true);
+            socket.setUseClientMode(true);
+            socket.setSoTimeout(5000);
+            socket.startHandshake();
             socket.setSoTimeout((int) Math.min(Math.max(timeoutMs, 1000L), 16000L));
 
             BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
@@ -1359,6 +1399,8 @@ public final class ChessAssistantPatch {
         } finally {
             if (socket != null) {
                 try { socket.close(); } catch (Exception ignored) {}
+            } else if (transport != null) {
+                try { transport.close(); } catch (Exception ignored) {}
             }
         }
     }
