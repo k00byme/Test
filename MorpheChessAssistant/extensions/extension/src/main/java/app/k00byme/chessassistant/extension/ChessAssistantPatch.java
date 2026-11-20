@@ -336,7 +336,7 @@ public final class ChessAssistantPatch {
                                     : connectionFailureCount == 3 ? 12000L : 30000L;
                             retryAfterElapsedRealtime = SystemClock.elapsedRealtime() + retryDelayMs;
                             setStatus("Conexão indisponível: " + result.error
-                                    + "\\nNova tentativa em " + (retryDelayMs / 1000L) + " s.");
+                                    + "\nNova tentativa em " + (retryDelayMs / 1000L) + " s.");
                             return;
                         }
 
