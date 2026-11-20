@@ -58,8 +58,8 @@ import java.util.regex.Pattern;
 /**
  * Runtime code merged into Chess.com by Morphe.
  *
- * This extension is installed from the dedicated Play-vs-Bots activity,
- * the general RealGameActivity used for online games, and standalone analysis.
+ * This extension is installed from the dedicated Play-vs-Bots activity
+ * and standalone analysis. Human live-game screens are intentionally not hooked.
  * It only draws an overlay; it never clicks squares, submits moves, or changes game state.
  */
 public final class ChessAssistantPatch {
@@ -409,6 +409,11 @@ public final class ChessAssistantPatch {
                 selected = candidates[1];
             }
             if (!isUciMove(selected.move)) return;
+            if (selected.move.length() == 5) {
+                lastAutoFen = fen;
+                setStatus("AUTO: promoção detectada; escolha a peça manualmente.");
+                return;
+            }
 
             final CandidateMove move = selected;
             final View targetBoard = boardView;
