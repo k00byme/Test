@@ -18,11 +18,11 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 - Board orientation handling and stale-overlay clearing.
 - Visual assistance remains enabled on supported online game screens and in post-game analysis. AUTO never sends moves in human-vs-human games.
 
-The normal engine request uses depth 12, up to two variants, and a 100 ms thinking-time setting. The WebSocket stream is collected until the engine's final `bestmove` event; the final move is treated as authoritative and is not replaced by an earlier provisional line. If the WebSocket path fails or returns inconsistent data, the patch tries the Chess API HTTP endpoint and then the Stockfish Online endpoint. This may take longer than the former early-return implementation, but avoids displaying a provisional move as the final best choice.
+The normal engine request uses depth 12, up to two variants, and a 100 ms thinking-time setting. The completed Chess API HTTPS response is the primary source, and its top-level `move` field remains authoritative for the green recommendation. If that request fails, the patch immediately tries Stockfish Online on a separate host; only after that does it try the Chess API WebSocket as a final MultiPV fallback. This avoids spending the full WebSocket timeout on the same host before reaching the independent fallback provider.
 
 ## Rare special assistance
 
-A separate deeper pass is requested for each valid board position, instead of being gated by shallow-score thresholds. It uses depth 18, up to four variants, and a 100 ms thinking-time setting. The WebSocket path waits for the final engine result and has an HTTP fallback.
+A separate deeper pass is requested for each valid board position, instead of being gated by shallow-score thresholds. It uses depth 18, up to four variants, and a 100 ms thinking-time setting. The HTTPS endpoint is tried first; WebSocket is used only if that request fails.
 
 The special indicator can identify a forced tactical sequence, a uniquely saving move, a decisive continuation, a hidden winning line, or a material sacrifice that retains sufficient engine compensation. Capture sacrifices, en passant, and promotions are included in the preliminary sacrifice scan. The indicator and purple board arrow appear only when the deeper engine result meets the corresponding confirmation criteria; checkmate is not required. This remains an engine-based heuristic, not a guarantee that every brilliant move will be found or that every label is infallible. The deeper search runs asynchronously so it does not block the regular green/yellow suggestions.
 
@@ -36,7 +36,7 @@ The player's color is read from exposed activity/board metadata when available, 
 
 ## Engine connectivity and privacy
 
-The normal move assistance uses the completed HTTP response from `https://chess-api.com/v1` first and treats its top-level `move` field as authoritative for the green recommendation. The WebSocket path is retained as a fallback. If both Chess API paths fail, the patch falls back to `https://stockfish.online/api/s/v2.php`, which provides one best move. Error responses are surfaced with the provider's returned detail where available. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
+The normal move assistance tries `https://chess-api.com/v1` over HTTPS first and treats its top-level `move` field as authoritative for the green recommendation. On failure it immediately tries `https://stockfish.online/api/s/v2.php` on a separate host; that fallback provides one best move. The Chess API WebSocket is the final fallback and now performs TLS using the explicit hostname for SNI/certificate validation. Failed positions are retried automatically after 3, 6, 12, and then 30 seconds, while a newly detected position is analyzed immediately. The deeper special-analysis request also uses HTTPS before WebSocket. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
 
 ## Compatibility and build
 
