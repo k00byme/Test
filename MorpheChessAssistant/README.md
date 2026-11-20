@@ -14,7 +14,7 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 - Up to two analyzed MultiPV candidate moves: the engine's final top line and its second line.
 - Green arrow for the final best line; yellow arrow for the second alternative.
 - Blue origin-square highlight and destination highlight matching each arrow.
-- No third / worst-move suggestion, badges, or text labels.
+- No third / worst-move arrow or ordinary move badges; the separate special-alert panel has its own descriptive text.
 - Board orientation handling and stale-overlay clearing.
 - Visual assistance remains enabled on supported online game screens and in post-game analysis. AUTO never sends moves in human-vs-human games.
 
@@ -36,7 +36,7 @@ The player's color is read from exposed activity/board metadata when available, 
 
 ## Engine connectivity and privacy
 
-The extension uses `https://chess-api.com/v1` over WebSocket for two MultiPV lines. If that service fails completely, it falls back to `https://stockfish.online/api/s/v2.php`, which provides one best move. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
+The extension uses `https://chess-api.com/v1` over WebSocket for MultiPV lines and also tries the same Chess API over HTTP if the WebSocket path fails or returns inconsistent data. If both Chess API paths fail, it falls back to `https://stockfish.online/api/s/v2.php`, which provides one best move. Error responses are surfaced with the provider's returned detail where available, rather than always showing a generic rejection message. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
 
 ## Compatibility and build
 
