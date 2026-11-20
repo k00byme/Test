@@ -68,17 +68,19 @@ public final class ChessAssistantPatch {
     private static final String BOARD_CLASS_V1 = "com.chess.chessboard.view.ChessBoardView";
     private static final String CHESS_API_HOST = "chess-api.com";
     private static final String CHESS_API_PATH = "/v1";
+    private static final String CHESS_API_URL = "https://chess-api.com/v1";
     private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
-    private static final int ENGINE_DEPTH = 10;
+    private static final int ENGINE_DEPTH = 12;
     private static final int ENGINE_VARIANTS = 2;
-    private static final int ENGINE_MAX_THINKING_TIME_MS = 80;
+    private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final long BOARD_POLL_INTERVAL_MS = 350L;
+    private static final long ENGINE_TIMEOUT_MS = 15000L;
     private static final long AUTO_MIN_DELAY_MS = 2000L;
     private static final long AUTO_MAX_DELAY_MS = 5000L;
     private static final int SPECIAL_ENGINE_DEPTH = 18;
     private static final int SPECIAL_ENGINE_VARIANTS = 4;
-    private static final int SPECIAL_ENGINE_MAX_THINKING_TIME_MS = 900;
-    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 10000L;
+    private static final int SPECIAL_ENGINE_MAX_THINKING_TIME_MS = 100;
+    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 15000L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private ChessAssistantPatch() {}
@@ -346,17 +348,9 @@ public final class ChessAssistantPatch {
          * a tactical sacrifice, a decisive continuation, or a forced mate.
          */
         private boolean shouldRequestSpecialAnalysis(String fen, CandidateMove[] normal) {
-            if (normal == null || normal.length < 2) return false;
-            CandidateMove first = normal[0];
-            CandidateMove second = normal[1];
-            double best = first.scoreForMover();
-            double next = second.scoreForMover();
-            double gap = best - next;
-            return first.mate != 0 || second.mate != 0
-                    || gap >= 0.45
-                    || best >= 1.10
-                    || isLikelyMaterialSacrifice(fen, first.move)
-                    || isLikelyMaterialSacrifice(fen, second.move);
+            // Do not pre-filter with shallow scores: hidden sacrifices and quiet tactical
+            // moves often look ordinary until the deeper pass examines the position.
+            return isFen(fen) && normal != null && normal.length > 0;
         }
 
         private void requestSpecialAnalysis(final String fen, final CandidateMove[] normal) {
@@ -377,7 +371,7 @@ public final class ChessAssistantPatch {
 
                         // Ignore stale deep results if the board has already advanced.
                         if (!fen.equals(activeFen)) {
-                            if (isFen(activeFen) && candidates.length >= 2) {
+                            if (isFen(activeFen) && candidates.length >= 1) {
                                 requestSpecialAnalysis(activeFen, candidates.clone());
                             }
                             return;
@@ -848,63 +842,94 @@ public final class ChessAssistantPatch {
                 true
         );
         if (result.error != null) return result;
-        if (result.candidates.length < 2) {
-            return EngineResult.error("análise profunda não confirmou alternativas suficientes");
+        if (result.candidates.length == 0) {
+            return EngineResult.error("a análise profunda não retornou uma linha válida");
         }
         return result;
     }
 
     private static SpecialFinding findSpecialFinding(String fen, CandidateMove[] normal,
                                                      EngineResult deep) {
-        if (deep == null || deep.error != null || deep.candidates.length < 2) return null;
-        CandidateMove first = deep.candidates[0];
-        CandidateMove second = deep.candidates[1];
-        double best = first.scoreForMover();
-        double next = second.scoreForMover();
-        double gap = best - next;
+        if (deep == null || deep.error != null || deep.candidates.length == 0) return null;
 
-        if (first.mate != 0 && best > 500.0 && gap >= 0.5) {
+        CandidateMove first = deep.candidates[0];
+        CandidateMove second = deep.candidates.length > 1 ? deep.candidates[1] : null;
+
+        // If the deep provider returns only its final best line, use the quick pass's
+        // other line for comparison instead of silently disabling special detection.
+        if (second == null && normal != null) {
+            for (CandidateMove candidate : normal) {
+                if (candidate != null && !candidate.move.equalsIgnoreCase(first.move)) {
+                    second = candidate;
+                    break;
+                }
+            }
+        }
+
+        double best = first.scoreForMover();
+        double next = second == null ? Double.NaN : second.scoreForMover();
+        double gap = second == null ? 0.0 : best - next;
+
+        if (first.mate != 0 && best > 500.0) {
             return new SpecialFinding(first, "SEQUÊNCIA TÁTICA EXCEPCIONAL",
-                    "A análise profunda confirmou uma linha forçada de mate.");
+                    "A busca profunda confirmou uma linha forçada de mate.");
         }
-        if (isLikelyMaterialSacrifice(fen, first.move) && best >= 0.9 && gap >= 0.8) {
+
+        if (isLikelyMaterialSacrifice(fen, first.move)
+                && best >= -0.35 && (second == null || gap >= 0.25)) {
             return new SpecialFinding(first, "SACRIFÍCIO COM COMPENSAÇÃO",
-                    "O motor confirma compensação suficiente apesar da peça ficar capturável.");
+                    "O motor confirma que o sacrifício mantém a posição competitiva ou vencedora.");
         }
-        if (best >= -0.30 && next <= -1.50 && gap >= 1.20) {
+
+        if (second != null && best >= -0.50 && next <= -1.10 && gap >= 0.75) {
             return new SpecialFinding(first, "ÚNICA JOGADA",
-                    "Esta linha mantém a posição; as alternativas analisadas deixam o lado em desvantagem decisiva.");
+                    "Esta linha mantém a posição; as alternativas analisadas deixam o lado em clara desvantagem.");
         }
-        if (best >= 1.60 && gap >= 1.25) {
+
+        if (second != null && best >= 1.25 && gap >= 0.60) {
             return new SpecialFinding(first, "JOGADA VENCEDORA",
-                    "A busca profunda encontrou uma vantagem decisiva que não aparece nas alternativas.");
+                    "A busca profunda encontrou uma continuação decisiva.");
         }
-        if (normal != null && normal.length > 0
-                && normal[0].scoreForMover() <= 0.20
-                && best >= 1.50 && gap >= 0.90) {
-            return new SpecialFinding(first, "CONTINUAÇÃO OCULTA",
-                    "A avaliação superficial parecia desfavorável, mas a linha profunda confirma uma continuação vencedora.");
+
+        if (normal != null && normal.length > 0) {
+            double quickBest = normal[0].scoreForMover();
+            boolean differentMove = !first.move.equalsIgnoreCase(normal[0].move);
+
+            if (best >= 0.85 && best - quickBest >= 0.65
+                    && (second == null || gap >= 0.40)) {
+                return new SpecialFinding(first, "CONTINUAÇÃO OCULTA",
+                        "A análise rápida não identificou a força desta linha; a busca profunda confirmou a continuação.");
+            }
+
+            if (differentMove && best >= 1.00
+                    && (second == null || gap >= 0.40)) {
+                return new SpecialFinding(first, "OPORTUNIDADE BRILHANTE",
+                        "A busca profunda encontrou uma jogada excepcional que não aparecia como primeira opção na análise rápida.");
+            }
         }
+
         return null;
     }
 
     private static boolean isLikelyMaterialSacrifice(String fen, String move) {
         if (!isUciMove(move)) return false;
-        String[] fields = fen == null ? new String[0] : fen.split("\\s+");
+        String[] fields = fen == null ? new String[0] : fen.trim().split("\\s+");
         if (fields.length != 6) return false;
         String[] ranks = fields[0].split("/");
         if (ranks.length != 8) return false;
 
         char[][] board = new char[8][8];
-        for (int r = 0; r < 8; r++) {
+        for (int row = 0; row < 8; row++) {
             int file = 0;
-            for (int i = 0; i < ranks[r].length(); i++) {
-                char token = ranks[r].charAt(i);
+            for (int i = 0; i < ranks[row].length(); i++) {
+                char token = ranks[row].charAt(i);
                 if (token >= '1' && token <= '8') {
                     int count = token - '0';
-                    while (count-- > 0 && file < 8) board[r][file++] = '.';
+                    while (count-- > 0 && file < 8) board[row][file++] = '.';
                 } else if (file < 8) {
-                    board[r][file++] = token;
+                    board[row][file++] = token;
+                } else {
+                    return false;
                 }
             }
             if (file != 8) return false;
@@ -918,13 +943,51 @@ public final class ChessAssistantPatch {
                 || fromFile < 0 || fromFile > 7 || toFile < 0 || toFile > 7) return false;
 
         char piece = board[fromRow][fromFile];
-        if (piece == '.' || Character.toLowerCase(piece) == 'p'
-                || Character.toLowerCase(piece) == 'k' || board[toRow][toFile] != '.') return false;
+        if (piece == '.' || Character.toLowerCase(piece) == 'k') return false;
+
+        boolean moverIsWhite = Character.isUpperCase(piece);
+        char captured = board[toRow][toFile];
+        if (captured != '.' && Character.isUpperCase(captured) == moverIsWhite) return false;
+
+        // Handle en passant, where the captured pawn is not on the destination square.
+        if (Character.toLowerCase(piece) == 'p' && fromFile != toFile && captured == '.') {
+            int capturedRow = toRow + (moverIsWhite ? 1 : -1);
+            if (capturedRow < 0 || capturedRow > 7
+                    || Character.toLowerCase(board[capturedRow][toFile]) != 'p'
+                    || Character.isUpperCase(board[capturedRow][toFile]) == moverIsWhite) {
+                return false;
+            }
+            board[capturedRow][toFile] = '.';
+            captured = moverIsWhite ? 'p' : 'P';
+        }
+
+        char movedPiece = piece;
+        if (move.length() == 5) {
+            char promoted = move.charAt(4);
+            movedPiece = moverIsWhite ? Character.toUpperCase(promoted)
+                    : Character.toLowerCase(promoted);
+        }
+
+        // A capture of an equal- or higher-value piece is not treated as a material
+        // sacrifice by this geometric pre-filter. The deep engine result is decisive.
+        if (pieceValue(captured) >= pieceValue(movedPiece) && captured != '.') return false;
 
         board[fromRow][fromFile] = '.';
-        board[toRow][toFile] = piece;
-        boolean opponentIsWhite = Character.isLowerCase(piece);
-        return isSquareAttacked(board, toRow, toFile, opponentIsWhite);
+        board[toRow][toFile] = movedPiece;
+
+        return isSquareAttacked(board, toRow, toFile, !moverIsWhite);
+    }
+
+    private static int pieceValue(char piece) {
+        switch (Character.toLowerCase(piece)) {
+            case 'p': return 1;
+            case 'n':
+            case 'b': return 3;
+            case 'r': return 5;
+            case 'q': return 9;
+            case 'k': return 100;
+            default: return 0;
+        }
     }
 
     private static boolean isSquareAttacked(char[][] board, int targetRow, int targetFile,
@@ -972,8 +1035,14 @@ public final class ChessAssistantPatch {
         EngineResult multiPv = fetchChessApi(fen);
         if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
 
-        // Keep the previous service as a fallback so the original best-move feature
-        // remains available when the MultiPV provider is temporarily unreachable.
+        // The REST endpoint returns the completed result instead of a progressive
+        // stream, so it is a useful second path when the WebSocket is unavailable.
+        EngineResult rest = fetchChessApiHttp(
+                fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS
+        );
+        if (rest.error == null && rest.candidates.length > 0) return rest;
+
+        // Preserve the original Stockfish Online provider as the last fallback.
         EngineResult fallback = fetchStockfish(fen);
         if (fallback.error == null && !fallback.bestMove.isEmpty()) {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
@@ -984,14 +1053,107 @@ public final class ChessAssistantPatch {
             return new EngineResult(fallback.bestMove, fallback.evaluation, fallback.mate,
                     null, new CandidateMove[]{single});
         }
-        String primaryError = multiPv.error == null ? "nenhuma variação recebida" : multiPv.error;
-        String fallbackError = fallback.error == null ? "sem melhor jogada" : fallback.error;
-        return EngineResult.error(primaryError + " (reserva: " + fallbackError + ")");
+
+        String primaryError = multiPv.error == null ? "nenhuma variante recebida" : multiPv.error;
+        String restError = rest.error == null ? "nenhuma jogada no retorno REST" : rest.error;
+        String fallbackError = fallback.error == null ? "o serviço não retornou uma jogada" : fallback.error;
+        return EngineResult.error("WebSocket: " + primaryError
+                + " | REST: " + restError + " | Reserva: " + fallbackError);
+    }
+
+    private static EngineResult fetchChessApiHttp(String fen, int depth, int variants,
+                                                  int maxThinkingTimeMs) {
+        HttpURLConnection connection = null;
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("fen", fen);
+            payload.put("depth", depth);
+            payload.put("maxThinkingTime", maxThinkingTimeMs);
+            payload.put("variants", variants);
+
+            connection = (HttpURLConnection) new URL(CHESS_API_URL).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setConnectTimeout(8000);
+            connection.setReadTimeout(10000);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/2.0");
+
+            byte[] requestBody = payload.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(requestBody.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(requestBody);
+                output.flush();
+            }
+
+            int code = connection.getResponseCode();
+            InputStream stream = code >= 200 && code < 300
+                    ? connection.getInputStream() : connection.getErrorStream();
+            if (stream == null) return EngineResult.error("Chess API REST HTTP " + code);
+
+            StringBuilder body = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) body.append(line);
+            }
+            if (code < 200 || code >= 300) {
+                return EngineResult.error("Chess API REST HTTP " + code + ": " + body);
+            }
+
+            JSONObject json = new JSONObject(body.toString());
+            if ("error".equalsIgnoreCase(json.optString("type", ""))
+                    || json.has("error")
+                    || (json.has("success") && !json.optBoolean("success", false))) {
+                return EngineResult.error(readServiceError(json, "o serviço REST recusou a posição"));
+            }
+
+            boolean whiteToMove = fen.split("\\s+")[1].equals("w");
+            ArrayList<CandidateMove> found = new ArrayList<>();
+            collectCandidatePayload(json, whiteToMove, found, depth);
+            if (found.isEmpty()) {
+                return EngineResult.error(json.optString("text", "o serviço REST não retornou uma jogada válida"));
+            }
+
+            Collections.sort(found, (left, right) ->
+                    Double.compare(right.scoreForMover(), left.scoreForMover()));
+            while (found.size() > variants) found.remove(found.size() - 1);
+
+            CandidateMove best = found.get(0).withLabel("EXCELENTE");
+            ArrayList<CandidateMove> selected = new ArrayList<>();
+            selected.add(best);
+            if (found.size() > 1) {
+                CandidateMove second = found.get(1);
+                double loss = best.scoreForMover() - second.scoreForMover();
+                selected.add(second.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+            }
+
+            CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
+            return new EngineResult(best.move, best.evaluation, best.mate, null, candidates);
+        } catch (Exception ex) {
+            String message = ex.getMessage();
+            if (message == null || message.trim().isEmpty()) message = "falha no Chess API REST";
+            if (message.length() > 90) message = message.substring(0, 90);
+            return EngineResult.error(message);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static String readServiceError(JSONObject json, String fallback) {
+        Object detail = json.opt("data");
+        if (detail == null || detail == JSONObject.NULL) detail = json.opt("error");
+        if (detail == null || detail == JSONObject.NULL) detail = json.opt("message");
+        String message = detail == null || detail == JSONObject.NULL
+                ? fallback : String.valueOf(detail);
+        if (message.length() > 90) message = message.substring(0, 90);
+        return message;
     }
 
     private static EngineResult fetchChessApi(String fen) {
         return fetchChessApi(fen, ENGINE_DEPTH, ENGINE_VARIANTS,
-                ENGINE_MAX_THINKING_TIME_MS, 6000L, false);
+                ENGINE_MAX_THINKING_TIME_MS, ENGINE_TIMEOUT_MS, true);
     }
 
     private static EngineResult fetchChessApi(String fen, int depth, int variants,
@@ -1001,7 +1163,7 @@ public final class ChessAssistantPatch {
         try {
             socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
             socket.connect(new InetSocketAddress(CHESS_API_HOST, 443), 5000);
-            socket.setSoTimeout(6000);
+            socket.setSoTimeout((int) Math.min(Math.max(timeoutMs, 1000L), 16000L));
 
             BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
@@ -1009,14 +1171,14 @@ public final class ChessAssistantPatch {
             byte[] nonce = new byte[16];
             new SecureRandom().nextBytes(nonce);
             String webSocketKey = Base64.encodeToString(nonce, Base64.NO_WRAP);
-            String request = "GET " + CHESS_API_PATH + " HTTP/1.1\r\n"
-                    + "Host: " + CHESS_API_HOST + "\r\n"
-                    + "Upgrade: websocket\r\n"
-                    + "Connection: Upgrade\r\n"
-                    + "Sec-WebSocket-Key: " + webSocketKey + "\r\n"
-                    + "Sec-WebSocket-Version: 13\r\n"
-                    + "Origin: https://chess-api.com\r\n"
-                    + "User-Agent: ChessAssistant-Morphe/1.2\r\n\r\n";
+            String request = "GET " + CHESS_API_PATH + " HTTP/1.1\\r\\n"
+                    + "Host: " + CHESS_API_HOST + "\\r\\n"
+                    + "Upgrade: websocket\\r\\n"
+                    + "Connection: Upgrade\\r\\n"
+                    + "Sec-WebSocket-Key: " + webSocketKey + "\\r\\n"
+                    + "Sec-WebSocket-Version: 13\\r\\n"
+                    + "Origin: https://chess-api.com\\r\\n"
+                    + "User-Agent: ChessAssistant-Morphe/2.0\\r\\n\\r\\n";
             output.write(request.getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
@@ -1046,6 +1208,8 @@ public final class ChessAssistantPatch {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
             ArrayList<CandidateMove> found = new ArrayList<>();
             long deadline = System.currentTimeMillis() + timeoutMs;
+            boolean receivedFinal = false;
+            String finalMove = "";
 
             while (System.currentTimeMillis() < deadline) {
                 String message;
@@ -1073,39 +1237,64 @@ public final class ChessAssistantPatch {
 
                 String type = json.optString("type", "").toLowerCase(java.util.Locale.US);
                 if ("error".equals(type) || json.has("error")) {
-                    return EngineResult.error(json.optString("text",
-                            json.optString("error", "erro do serviço MultiPV")));
+                    return EngineResult.error(readServiceError(json, "erro do serviço MultiPV"));
                 }
 
-                if (!"bestmove".equals(type) || json.has("eval") || json.has("centipawns")) {
-                    collectCandidatePayload(json, whiteToMove, found);
+                if (!"bestmove".equals(type) || hasEngineScore(json)) {
+                    collectCandidatePayload(json, whiteToMove, found, depth);
                 }
 
-                // Normal assistance returns quickly after its requested lines arrive.
-                // Special assistance waits for the final engine message so the deeper search can refine them.
-                if ((!waitForFinal && found.size() >= variants) || "bestmove".equals(type)) break;
+                if ("bestmove".equals(type)) {
+                    receivedFinal = true;
+                    finalMove = extractFinalMove(json, trimmed);
+                    break;
+                }
+                if (!waitForFinal && found.size() >= variants) break;
             }
 
+            if (waitForFinal && !receivedFinal) {
+                return EngineResult.error("o motor não enviou a resposta final antes do limite de tempo");
+            }
             if (found.isEmpty()) {
-                return EngineResult.error("o WebSocket não retornou variantes");
+                return EngineResult.error("o WebSocket não retornou variantes com avaliação");
+            }
+            if (waitForFinal && finalMove.isEmpty()) {
+                return EngineResult.error("a resposta final não continha uma jogada UCI válida");
             }
 
             Collections.sort(found, (left, right) ->
                     Double.compare(right.scoreForMover(), left.scoreForMover()));
 
-            // Keep at most the requested MultiPV alternatives. Distinct first moves
-            // are retained so all arrows can be drawn simultaneously on the board.
-            while (found.size() > variants) found.remove(found.size() - 1);
-            for (int i = 0; i < found.size(); i++) {
-                if (found.get(i).depth < depth) found.set(i, found.get(i).withDepth(depth));
+            // The final bestmove event is authoritative. If it was already reported
+            // provisionally, move that candidate to the first slot without replacing
+            // its evaluation with a score-less final event.
+            if (!finalMove.isEmpty()) {
+                int finalIndex = -1;
+                for (int i = 0; i < found.size(); i++) {
+                    if (found.get(i).move.equalsIgnoreCase(finalMove)) {
+                        finalIndex = i;
+                        break;
+                    }
+                }
+                if (finalIndex < 0) {
+                    return EngineResult.error("o lance final não estava entre as variantes avaliadas");
+                }
+                if (finalIndex > 0) {
+                    CandidateMove confirmed = found.remove(finalIndex);
+                    found.add(0, confirmed);
+                }
             }
+
+            while (found.size() > variants) found.remove(found.size() - 1);
 
             CandidateMove best = found.get(0).withLabel("EXCELENTE");
             ArrayList<CandidateMove> selected = new ArrayList<>();
             selected.add(best);
 
             if (found.size() > 1) {
-                selected.add(found.get(1).withLabel("MEDIANA"));
+                CandidateMove second = found.get(1);
+                double loss = best.scoreForMover() - second.scoreForMover();
+                selected.add(second.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
             }
 
             CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
@@ -1122,9 +1311,38 @@ public final class ChessAssistantPatch {
         }
     }
 
+    private static boolean hasEngineScore(JSONObject json) {
+        Object eval = json.opt("eval");
+        Object centipawns = json.opt("centipawns");
+        Object mate = json.opt("mate");
+        return (eval instanceof Number || eval instanceof String)
+                || (centipawns instanceof Number || centipawns instanceof String)
+                || mate instanceof Number;
+    }
+
+    private static String extractFinalMove(JSONObject json, String rawMessage) {
+        String move = json.optString("move", "").trim();
+        if (!isUciMove(move)) move = json.optString("lan", "").trim();
+        if (!isUciMove(move)) move = json.optString("uci", "").trim();
+        if (!isUciMove(move)) {
+            String raw = json.optString("bestmove", "").trim();
+            if (raw.isEmpty()) raw = rawMessage == null ? "" : rawMessage.trim();
+            Matcher matcher = Pattern.compile(
+                    "(?i)bestmove\\\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+            ).matcher(raw);
+            if (matcher.find()) move = matcher.group(1);
+        }
+        return isUciMove(move) ? move.toLowerCase(java.util.Locale.US) : "";
+    }
+
     private static void collectCandidatePayload(JSONObject json, boolean whiteToMove,
                                                  ArrayList<CandidateMove> found) {
-        CandidateMove primary = parseCandidate(json, whiteToMove);
+        collectCandidatePayload(json, whiteToMove, found, ENGINE_DEPTH);
+    }
+
+    private static void collectCandidatePayload(JSONObject json, boolean whiteToMove,
+                                                 ArrayList<CandidateMove> found, int defaultDepth) {
+        CandidateMove primary = parseCandidate(json, whiteToMove, defaultDepth);
         if (primary != null) addOrUpdateCandidate(found, primary);
 
         String[] arrayKeys = {"variants", "moves", "lines", "pvs"};
@@ -1134,7 +1352,7 @@ public final class ChessAssistantPatch {
             for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.optJSONObject(i);
                 if (item == null) continue;
-                CandidateMove candidate = parseCandidate(item, whiteToMove);
+                CandidateMove candidate = parseCandidate(item, whiteToMove, defaultDepth);
                 if (candidate != null) addOrUpdateCandidate(found, candidate);
             }
         }
@@ -1256,10 +1474,20 @@ public final class ChessAssistantPatch {
     }
 
     private static CandidateMove parseCandidate(JSONObject json, boolean whiteToMove) {
+        return parseCandidate(json, whiteToMove, ENGINE_DEPTH);
+    }
+
+    private static CandidateMove parseCandidate(JSONObject json, boolean whiteToMove, int defaultDepth) {
         String move = json.optString("move", "").trim();
         if (!isUciMove(move)) move = json.optString("lan", "").trim();
         if (!isUciMove(move)) move = json.optString("uci", "").trim();
-        if (!isUciMove(move)) move = json.optString("bestmove", "").trim();
+        if (!isUciMove(move)) {
+            String bestMoveField = json.optString("bestmove", "").trim();
+            Matcher matcher = Pattern.compile(
+                    "(?i)bestmove\\\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+            ).matcher(bestMoveField);
+            if (matcher.find()) move = matcher.group(1);
+        }
         if (!isUciMove(move)) {
             String from = json.optString("from", "").trim();
             String to = json.optString("to", "").trim();
@@ -1272,18 +1500,38 @@ public final class ChessAssistantPatch {
         if (!isUciMove(move)) return null;
         move = move.toLowerCase(java.util.Locale.US);
 
-        double evaluation = json.optDouble("eval", Double.NaN);
-        if (Double.isNaN(evaluation)) {
-            String centipawns = json.optString("centipawns", "");
+        double evaluation = Double.NaN;
+        Object evalValue = json.opt("eval");
+        if (evalValue instanceof Number) {
+            evaluation = ((Number) evalValue).doubleValue();
+        } else if (evalValue instanceof String) {
             try {
-                evaluation = Double.parseDouble(centipawns) / 100.0;
+                evaluation = Double.parseDouble((String) evalValue);
             } catch (NumberFormatException ignored) {
-                evaluation = 0.0;
+                evaluation = Double.NaN;
             }
         }
 
-        int mate = json.isNull("mate") ? 0 : json.optInt("mate", 0);
-        int depth = json.optInt("depth", ENGINE_DEPTH);
+        if (Double.isNaN(evaluation)) {
+            Object centipawnValue = json.opt("centipawns");
+            try {
+                if (centipawnValue instanceof Number) {
+                    evaluation = ((Number) centipawnValue).doubleValue() / 100.0;
+                } else if (centipawnValue instanceof String) {
+                    evaluation = Double.parseDouble((String) centipawnValue) / 100.0;
+                }
+            } catch (NumberFormatException ignored) {
+                evaluation = Double.NaN;
+            }
+        }
+
+        Object mateValue = json.opt("mate");
+        int mate = mateValue instanceof Number ? ((Number) mateValue).intValue() : 0;
+        if (Double.isNaN(evaluation) && mate == 0) return null;
+        if (Double.isNaN(evaluation)) evaluation = 0.0;
+
+        int depth = json.optInt("depth", defaultDepth);
+        if (depth <= 0) depth = defaultDepth;
         return new CandidateMove(move, evaluation, mate, depth, whiteToMove, "");
     }
 
@@ -1299,15 +1547,15 @@ public final class ChessAssistantPatch {
             URL url = new URL(STOCKFISH_URL + "?" + query);
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(4000);
-            connection.setReadTimeout(5000);
+            connection.setConnectTimeout(8000);
+            connection.setReadTimeout(10000);
             connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/1.0");
+            connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/2.0");
 
             int code = connection.getResponseCode();
             InputStream stream = code >= 200 && code < 300
                     ? connection.getInputStream() : connection.getErrorStream();
-            if (stream == null) return EngineResult.error("HTTP " + code);
+            if (stream == null) return EngineResult.error("Stockfish Online HTTP " + code);
 
             StringBuilder body = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
@@ -1316,15 +1564,19 @@ public final class ChessAssistantPatch {
                 while ((line = reader.readLine()) != null) body.append(line);
             }
 
-            if (code < 200 || code >= 300) return EngineResult.error("HTTP " + code);
+            if (code < 200 || code >= 300) {
+                return EngineResult.error("Stockfish Online HTTP " + code + ": " + body);
+            }
+
             JSONObject json = new JSONObject(body.toString());
             if (!json.optBoolean("success", false)) {
-                return EngineResult.error("a API recusou a posição");
+                return EngineResult.error("Stockfish Online: "
+                        + readServiceError(json, "o serviço recusou a posição"));
             }
 
             String bestMoveField = json.optString("bestmove", "");
             Matcher moveMatcher = Pattern.compile(
-                    "bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+                    "bestmove\\\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
             ).matcher(bestMoveField);
             String move = moveMatcher.find() ? moveMatcher.group(1) : "";
 
@@ -1333,11 +1585,15 @@ public final class ChessAssistantPatch {
             if (mateValue instanceof Number) mateIn = ((Number) mateValue).intValue();
 
             double eval = json.optDouble("evaluation", 0.0);
+            if (move.isEmpty()) {
+                return EngineResult.error(json.optString("data",
+                        "Stockfish Online não retornou uma jogada válida"));
+            }
             return new EngineResult(move, eval, mateIn, null);
         } catch (Exception ex) {
             String message = ex.getMessage();
             if (message == null || message.trim().isEmpty()) message = "falha de conexão";
-            if (message.length() > 70) message = message.substring(0, 70);
+            if (message.length() > 90) message = message.substring(0, 90);
             return EngineResult.error(message);
         } finally {
             if (connection != null) connection.disconnect();
