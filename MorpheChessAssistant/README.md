@@ -36,7 +36,7 @@ The player's color is read from exposed activity/board metadata when available, 
 
 ## Engine connectivity and privacy
 
-The extension uses `https://chess-api.com/v1` over WebSocket for MultiPV lines and also tries the same Chess API over HTTP if the WebSocket path fails or returns inconsistent data. If both Chess API paths fail, it falls back to `https://stockfish.online/api/s/v2.php`, which provides one best move. Error responses are surfaced with the provider's returned detail where available, rather than always showing a generic rejection message. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
+The normal move assistance uses the completed HTTP response from `https://chess-api.com/v1` first and treats its top-level `move` field as authoritative for the green recommendation. The WebSocket path is retained as a fallback. If both Chess API paths fail, the patch falls back to `https://stockfish.online/api/s/v2.php`, which provides one best move. Error responses are surfaced with the provider's returned detail where available. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
 
 ## Compatibility and build
 
