@@ -116,6 +116,7 @@ public final class ChessAssistantPatch {
         private final WeakReference<Activity> activityRef;
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
+        private final ExecutorService specialWorker = Executors.newSingleThreadExecutor();
         private final TextView panel;
         private final BoardDrawing drawing;
         private final boolean botGame;
@@ -230,6 +231,7 @@ public final class ChessAssistantPatch {
             closed = true;
             handler.removeCallbacksAndMessages(null);
             worker.shutdownNow();
+            specialWorker.shutdownNow();
             super.onDetachedFromWindow();
         }
 
@@ -365,7 +367,7 @@ public final class ChessAssistantPatch {
             specialRequestedFen = fen;
             specialRequestInFlight = true;
             try {
-                worker.execute(() -> {
+                specialWorker.execute(() -> {
                     EngineResult deep = fetchSpecialAnalysis(fen);
                     final SpecialFinding finding = deep.error == null
                             ? findSpecialFinding(fen, normal, deep) : null;
