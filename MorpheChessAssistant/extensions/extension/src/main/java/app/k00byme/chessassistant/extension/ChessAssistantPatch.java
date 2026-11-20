@@ -840,6 +840,14 @@ public final class ChessAssistantPatch {
                 SPECIAL_ENGINE_TIMEOUT_MS,
                 true
         );
+        if (result.error != null || result.candidates.length == 0) {
+            result = fetchChessApiHttp(
+                    fen,
+                    SPECIAL_ENGINE_DEPTH,
+                    SPECIAL_ENGINE_VARIANTS,
+                    SPECIAL_ENGINE_MAX_THINKING_TIME_MS
+            );
+        }
         if (result.error != null) return result;
         if (result.candidates.length == 0) {
             return EngineResult.error("a análise profunda não retornou uma linha válida");
@@ -1102,8 +1110,7 @@ public final class ChessAssistantPatch {
             }
 
             JSONObject json = new JSONObject(body.toString());
-            if ("error".equalsIgnoreCase(json.optString("type", ""))
-                    || json.has("error")
+            if (hasServiceError(json)
                     || (json.has("success") && !json.optBoolean("success", false))) {
                 return EngineResult.error(readServiceError(json, "o serviço REST recusou a posição"));
             }
@@ -1138,6 +1145,13 @@ public final class ChessAssistantPatch {
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private static boolean hasServiceError(JSONObject json) {
+        if ("error".equalsIgnoreCase(json.optString("type", ""))) return true;
+        Object error = json.opt("error");
+        return error != null && error != JSONObject.NULL
+                && !String.valueOf(error).trim().isEmpty();
     }
 
     private static String readServiceError(JSONObject json, String fallback) {
@@ -1235,7 +1249,7 @@ public final class ChessAssistantPatch {
                 }
 
                 String type = json.optString("type", "").toLowerCase(java.util.Locale.US);
-                if ("error".equals(type) || json.has("error")) {
+                if (hasServiceError(json)) {
                     return EngineResult.error(readServiceError(json, "erro do serviço MultiPV"));
                 }
 
