@@ -18,7 +18,13 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 - Board orientation handling and stale-overlay clearing.
 - The visual assistance remains enabled for online games as in the earlier build. AUTO never sends moves in human-vs-human games.
 
-The MultiPV request asks for two lines instead of five, uses a lower depth and a shorter thinking budget, returns when both distinct first moves arrive, and polls the board more frequently. Actual timing still depends on network conditions and the external service.
+The normal MultiPV request asks for two lines, uses a short thinking budget, returns when both distinct first moves arrive, and polls the board frequently. Actual timing still depends on network conditions and the external service.
+
+## Rare special assistance
+
+Normal assistance remains visible continuously with the two strongest alternatives. Separately, when the quick analysis detects a possible unique line, forced mate, decisive continuation, or a possible material sacrifice, the patch requests a deeper search (depth 18, up to four lines, with a longer time budget). The special indicator and purple board arrow appear only when that deeper result confirms one of these patterns: a forced tactical/mating line, a uniquely saving or winning move, a winning continuation missed by the quick pass, or a non-capturing piece sacrifice that is attacked but retains sufficient engine compensation. Ordinary positions do not receive the special indicator.
+
+Sacrifice detection uses the FEN board and attacked-square geometry as a preliminary filter; the engine evaluation is the confirmation step. This is still an engine heuristic, not a guarantee that every extraordinary move will be detected. The deep pass is asynchronous, so normal two-line suggestions appear first.
 
 ## Automatic play against bots
 
