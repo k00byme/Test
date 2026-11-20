@@ -190,6 +190,7 @@ public final class ChessAssistantPatch {
                         LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
                         Gravity.TOP | Gravity.CENTER_HORIZONTAL
                 ));
+                autoButton.setVisibility(View.GONE);
                 updateAutoButton();
                 autoButton.setOnClickListener(view -> {
                     autoEnabled = !autoEnabled;
@@ -227,6 +228,7 @@ public final class ChessAssistantPatch {
             View found = findBoard(content);
             if (found == null) {
                 boardView = null;
+                if (autoButton != null) autoButton.setVisibility(View.GONE);
                 activeFen = "";
                 requestedFen = "";
                 clearAnalysis();
@@ -238,6 +240,7 @@ public final class ChessAssistantPatch {
 
             String fen = readFen(found);
             if (!isFen(fen)) {
+                if (autoButton != null) autoButton.setVisibility(View.GONE);
                 activeFen = "";
                 requestedFen = "";
                 clearAnalysis();
