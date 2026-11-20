@@ -11,20 +11,20 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 ## Move assistance
 
 - Stockfish evaluation panel.
-- Up to two MultiPV candidate moves: the engine's top line and its second line.
-- Green arrow for the top line; yellow arrow for the second line.
+- Up to two analyzed MultiPV candidate moves: the engine's final top line and its second line.
+- Green arrow for the final best line; yellow arrow for the second alternative.
 - Blue origin-square highlight and destination highlight matching each arrow.
 - No third / worst-move suggestion, badges, or text labels.
 - Board orientation handling and stale-overlay clearing.
-- The visual assistance remains enabled for online games as in the earlier build. AUTO never sends moves in human-vs-human games.
+- Visual assistance remains enabled on supported online game screens and in post-game analysis. AUTO never sends moves in human-vs-human games.
 
-The normal MultiPV request asks for two lines, uses a short thinking budget, returns when both distinct first moves arrive, and polls the board frequently. Actual timing still depends on network conditions and the external service.
+The normal engine request uses depth 12, up to two variants, and a 100 ms thinking-time setting. The WebSocket stream is collected until the engine's final `bestmove` event; the final move is treated as authoritative and is not replaced by an earlier provisional line. If the WebSocket path fails or returns inconsistent data, the patch tries the Chess API HTTP endpoint and then the Stockfish Online endpoint. This may take longer than the former early-return implementation, but avoids displaying a provisional move as the final best choice.
 
 ## Rare special assistance
 
-Normal assistance remains visible continuously with the two strongest alternatives. Separately, when the quick analysis detects a possible unique line, forced mate, decisive continuation, or a possible material sacrifice, the patch requests a deeper search (depth 18, up to four lines, with a longer time budget). The special indicator and purple board arrow appear only when that deeper result confirms one of these patterns: a forced tactical/mating line, a uniquely saving or winning move, a winning continuation missed by the quick pass, or a non-capturing piece sacrifice that is attacked but retains sufficient engine compensation. Ordinary positions do not receive the special indicator.
+A separate deeper pass is requested for each valid board position, instead of being gated by shallow-score thresholds. It uses depth 18, up to four variants, and a 100 ms thinking-time setting. The WebSocket path waits for the final engine result and has an HTTP fallback.
 
-Sacrifice detection uses the FEN board and attacked-square geometry as a preliminary filter; the engine evaluation is the confirmation step. This is still an engine heuristic, not a guarantee that every extraordinary move will be detected. The deep pass is asynchronous, so normal two-line suggestions appear first.
+The special indicator can identify a forced tactical sequence, a uniquely saving move, a decisive continuation, a hidden winning line, or a material sacrifice that retains sufficient engine compensation. Capture sacrifices, en passant, and promotions are included in the preliminary sacrifice scan. The indicator and purple board arrow appear only when the deeper engine result meets the corresponding confirmation criteria; checkmate is not required. This remains an engine-based heuristic, not a guarantee that every brilliant move will be found or that every label is infallible. The deeper search runs asynchronously so it does not block the regular green/yellow suggestions.
 
 ## Automatic play against bots
 
