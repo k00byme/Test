@@ -58,9 +58,8 @@ import java.util.regex.Pattern;
 /**
  * Runtime code merged into Chess.com by Morphe.
  *
- * This extension is installed from the dedicated Play-vs-Bots activity
- * and standalone analysis. Human live-game screens are intentionally not hooked.
- * It only draws an overlay; it never clicks squares, submits moves, or changes game state.
+ * This extension is installed from online games, Play-vs-Bots, and standalone analysis.
+ * It draws visual assistance on all supported screens; automatic move input remains bot-only.
  */
 public final class ChessAssistantPatch {
     private static final String TAG = "morphe.chess.assistant.analysis";
@@ -1171,14 +1170,14 @@ public final class ChessAssistantPatch {
             byte[] nonce = new byte[16];
             new SecureRandom().nextBytes(nonce);
             String webSocketKey = Base64.encodeToString(nonce, Base64.NO_WRAP);
-            String request = "GET " + CHESS_API_PATH + " HTTP/1.1\\r\\n"
-                    + "Host: " + CHESS_API_HOST + "\\r\\n"
-                    + "Upgrade: websocket\\r\\n"
-                    + "Connection: Upgrade\\r\\n"
-                    + "Sec-WebSocket-Key: " + webSocketKey + "\\r\\n"
-                    + "Sec-WebSocket-Version: 13\\r\\n"
-                    + "Origin: https://chess-api.com\\r\\n"
-                    + "User-Agent: ChessAssistant-Morphe/2.0\\r\\n\\r\\n";
+            String request = "GET " + CHESS_API_PATH + " HTTP/1.1\r\n"
+                    + "Host: " + CHESS_API_HOST + "\r\n"
+                    + "Upgrade: websocket\r\n"
+                    + "Connection: Upgrade\r\n"
+                    + "Sec-WebSocket-Key: " + webSocketKey + "\r\n"
+                    + "Sec-WebSocket-Version: 13\r\n"
+                    + "Origin: https://chess-api.com\r\n"
+                    + "User-Agent: ChessAssistant-Morphe/2.0\r\n\r\n";
             output.write(request.getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
@@ -1328,7 +1327,7 @@ public final class ChessAssistantPatch {
             String raw = json.optString("bestmove", "").trim();
             if (raw.isEmpty()) raw = rawMessage == null ? "" : rawMessage.trim();
             Matcher matcher = Pattern.compile(
-                    "(?i)bestmove\\\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+                    "(?i)bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
             ).matcher(raw);
             if (matcher.find()) move = matcher.group(1);
         }
@@ -1484,7 +1483,7 @@ public final class ChessAssistantPatch {
         if (!isUciMove(move)) {
             String bestMoveField = json.optString("bestmove", "").trim();
             Matcher matcher = Pattern.compile(
-                    "(?i)bestmove\\\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+                    "(?i)bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
             ).matcher(bestMoveField);
             if (matcher.find()) move = matcher.group(1);
         }
@@ -1576,7 +1575,7 @@ public final class ChessAssistantPatch {
 
             String bestMoveField = json.optString("bestmove", "");
             Matcher moveMatcher = Pattern.compile(
-                    "bestmove\\\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
+                    "bestmove\\s+([a-h][1-8][a-h][1-8][qrbn]?)"
             ).matcher(bestMoveField);
             String move = moveMatcher.find() ? moveMatcher.group(1) : "";
 
