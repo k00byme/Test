@@ -64,6 +64,7 @@ import java.util.regex.Pattern;
  */
 public final class ChessAssistantPatch {
     private static final String TAG = "morphe.chess.assistant.analysis";
+    private static final String OFFICIAL_CLASSIFICATION_TAG = "morphe.chess.assistant.official.classification";
     private static final String BOARD_CLASS_V2 = "com.chess.chessboard.v2.ChessBoardView";
     private static final String BOARD_CLASS_V1 = "com.chess.chessboard.view.ChessBoardView";
     private static final String CHESS_API_HOST = "chess-api.com";
@@ -86,6 +87,104 @@ public final class ChessAssistantPatch {
     private ChessAssistantPatch() {}
 
     /** Called from BotGameActivityV2 or the standalone analysis screen. */
+
+    /**
+     * Receives the classification produced by Chess.com's own Game Review callback.
+     * The callback is GameReviewActivity$c; its synthetic outer-instance field points
+     * to the GameReviewActivity that owns the current review.
+     */
+    public static void onOfficialClassification(Object callback, Object classification, Object color) {
+        if (callback == null || classification == null || color == null) return;
+
+        String value = classification instanceof Enum
+                ? ((Enum<?>) classification).name()
+                : String.valueOf(classification);
+        value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
+        if ("GREAT_FIND".equals(value)) value = "GREAT";
+        if (!("BRILLIANT".equals(value) || "GREAT".equals(value)
+                || "BEST".equals(value) || "EXCELLENT".equals(value)
+                || "GOOD".equals(value) || "INACCURACY".equals(value)
+                || "MISTAKE".equals(value) || "BLUNDER".equals(value))) {
+            return;
+        }
+
+        String side = color instanceof Enum
+                ? ((Enum<?>) color).name()
+                : String.valueOf(color);
+        side = side == null ? "" : side.trim().toUpperCase(java.util.Locale.US);
+        if (!("WHITE".equals(side) || "BLACK".equals(side))) side = "PLAYER";
+
+        Activity activity = null;
+        for (Class<?> type = callback.getClass(); type != null && activity == null;
+             type = type.getSuperclass()) {
+            try {
+                Field outer = type.getDeclaredField("a");
+                outer.setAccessible(true);
+                Object candidate = outer.get(callback);
+                if (candidate instanceof Activity) activity = (Activity) candidate;
+            } catch (Throwable ignored) {
+                // Try the next class/field; obfuscated synthetic outer fields can vary.
+            }
+            if (activity == null) {
+                try {
+                    for (Field field : type.getDeclaredFields()) {
+                        if (Activity.class.isAssignableFrom(field.getType())) {
+                            field.setAccessible(true);
+                            Object candidate = field.get(callback);
+                            if (candidate instanceof Activity) {
+                                activity = (Activity) candidate;
+                                break;
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // No Activity reference was exposed by this callback.
+                }
+            }
+        }
+        if (activity == null) return;
+
+        final Activity target = activity;
+        final String officialValue = value;
+        final String officialSide = side;
+        MAIN.post(() -> {
+            if (target.isFinishing()
+                    || (Build.VERSION.SDK_INT >= 17 && target.isDestroyed())) return;
+            View content = target.findViewById(android.R.id.content);
+            if (!(content instanceof ViewGroup)) return;
+            ViewGroup root = (ViewGroup) content;
+            TextView badge = root.findViewWithTag(OFFICIAL_CLASSIFICATION_TAG);
+            if (badge == null) {
+                badge = new TextView(target);
+                badge.setTag(OFFICIAL_CLASSIFICATION_TAG);
+                badge.setTextColor(0xFFFFFFFF);
+                badge.setTextSize(13.0f);
+                badge.setTypeface(Typeface.create("sans-serif-bold", Typeface.BOLD));
+                badge.setGravity(Gravity.CENTER);
+                badge.setPadding(dp(target, 14), dp(target, 9), dp(target, 14), dp(target, 9));
+                badge.setElevation(dp(target, 8));
+                badge.setClickable(false);
+                badge.setFocusable(false);
+                GradientDrawable background = new GradientDrawable();
+                background.setColor(0xE820242B);
+                background.setCornerRadius(dp(target, 18));
+                background.setStroke(dp(target, 1), 0x887F8A99);
+                badge.setBackground(background);
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.CENTER_HORIZONTAL
+                );
+                params.topMargin = dp(target, 56);
+                root.addView(badge, params);
+            }
+            badge.setText("CHESS.COM  ·  " + officialValue + "  ·  " + officialSide);
+            badge.setContentDescription("Classificação oficial: " + officialValue
+                    + ", " + officialSide);
+            badge.setVisibility(View.VISIBLE);
+        });
+    }
+
     public static void install(Activity activity) {
         if (activity == null) return;
         String activityName = activity.getClass().getName();
