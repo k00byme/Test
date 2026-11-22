@@ -66,7 +66,7 @@ val chessAssistantPatch = patch(
 
         // Game Review reports Chess.com's own per-move classification and mover color.
         val classificationFingerprint = Fingerprint(
-            definingClass = "Lcom/chess/gamereview/v2/GameReviewActivity$c;",
+            definingClass = "Lcom/chess/gamereview/v2/GameReviewActivity\$c;",
             name = "b0",
             returnType = "V",
             parameters = listOf(
