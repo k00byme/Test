@@ -153,7 +153,7 @@ public final class ChessAssistantPatch {
             View content = target.findViewById(android.R.id.content);
             if (!(content instanceof ViewGroup)) return;
             ViewGroup root = (ViewGroup) content;
-            TextView badge = root.findViewWithTag(OFFICIAL_CLASSIFICATION_TAG);
+            TextView badge = (TextView) root.findViewWithTag(OFFICIAL_CLASSIFICATION_TAG);
             if (badge == null) {
                 badge = new TextView(target);
                 badge.setTag(OFFICIAL_CLASSIFICATION_TAG);
