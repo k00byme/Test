@@ -71,7 +71,7 @@ public final class ChessAssistantPatch {
     private static final String CHESS_API_URL = "https://chess-api.com/v1";
     private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
     private static final int ENGINE_DEPTH = 12;
-    private static final int ENGINE_VARIANTS = 2;
+    private static final int ENGINE_VARIANTS = 3;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final long BOARD_POLL_INTERVAL_MS = 350L;
     private static final long ENGINE_TIMEOUT_MS = 15000L;
@@ -312,7 +312,7 @@ public final class ChessAssistantPatch {
             }
             requestedFen = fen;
             requestInFlight = true;
-            setStatus("Stockfish analisando duas alternativas…");
+            setStatus("Stockfish analisando três alternativas…");
             try {
                 worker.execute(() -> {
                     EngineResult result = fetchAnalysis(fen);
@@ -328,7 +328,7 @@ public final class ChessAssistantPatch {
                         }
 
                         if (result.error != null) {
-                            clearAnalysis();
+                            // Keep the last valid rendering until a replacement analysis succeeds.
                             failedFen = fen;
                             connectionFailureCount = Math.min(connectionFailureCount + 1, 4);
                             long retryDelayMs = connectionFailureCount == 1 ? 3000L
@@ -351,7 +351,7 @@ public final class ChessAssistantPatch {
                         String evalText = result.mate != 0
                                 ? "Mate em " + result.mate
                                 : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
-                        String mode = candidates.length >= 2 ? "2 opções" : candidates.length + " opção(ões)";
+                        String mode = candidates.length >= 3 ? "3 linhas" : candidates.length + " linha(s) disponível(is)";
                         analysisSummary = "STOCKFISH 18  •  profundidade " + ENGINE_DEPTH
                                 + "\nAvaliação: " + evalText
                                 + "\n" + mode;
@@ -363,7 +363,14 @@ public final class ChessAssistantPatch {
                 });
             } catch (RuntimeException ex) {
                 requestInFlight = false;
-                setStatus("Não foi possível iniciar a análise.");
+                failedFen = fen;
+                connectionFailureCount = Math.min(connectionFailureCount + 1, 4);
+                long retryDelayMs = connectionFailureCount == 1 ? 3000L
+                        : connectionFailureCount == 2 ? 6000L
+                        : connectionFailureCount == 3 ? 12000L : 30000L;
+                retryAfterElapsedRealtime = SystemClock.elapsedRealtime() + retryDelayMs;
+                setStatus("Não foi possível iniciar a análise. Nova tentativa em "
+                        + (retryDelayMs / 1000L) + " s.");
             }
         }
 
@@ -1090,15 +1097,27 @@ public final class ChessAssistantPatch {
     }
 
     private static EngineResult fetchAnalysis(String fen) {
-        // First use the Chess API REST endpoint for two evaluated lines.
+        // REST first. Request three genuinely distinct evaluated lines.
         EngineResult rest = fetchChessApiHttp(
                 fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS
         );
-        if (rest.error == null && rest.candidates.length > 0) return rest;
+        if (rest.error == null && rest.candidates.length >= ENGINE_VARIANTS) return rest;
 
-        // Fail over immediately to a different provider, rather than waiting
-        // for another protocol connection to the same Chess API host.
+        // WebSocket is attempted before the single-line provider so a transient
+        // REST response cannot silently downgrade MultiPV to one move.
+        EngineResult socket = fetchChessApi(
+                fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS, 9000L, true
+        );
+        if (socket.error == null && socket.candidates.length > 0) {
+            if (rest.error == null && rest.candidates.length > 0) {
+                return combineCandidateResults(rest, socket, ENGINE_VARIANTS);
+            }
+            return socket;
+        }
+
+        // The independent provider is a last-resort best-move fallback only.
         EngineResult fallback = fetchStockfish(fen);
+        if (rest.error == null && rest.candidates.length > 0) return rest;
         if (fallback.error == null && !fallback.bestMove.isEmpty()) {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
             CandidateMove single = new CandidateMove(
@@ -1109,18 +1128,54 @@ public final class ChessAssistantPatch {
                     null, new CandidateMove[]{single});
         }
 
-        // Last resort: try the WebSocket path with a correct TLS peer hostname.
-        EngineResult multiPv = fetchChessApi(
-                fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS, 7000L, true
-        );
-        if (multiPv.error == null && multiPv.candidates.length > 0) return multiPv;
-
-        String restError = rest.error == null ? "nenhuma jogada no retorno REST" : rest.error;
+        String restError = rest.error == null ? "retorno REST incompleto" : rest.error;
+        String socketError = socket.error == null ? "nenhuma variante recebida" : socket.error;
         String fallbackError = fallback.error == null ? "o serviço não retornou uma jogada" : fallback.error;
-        String socketError = multiPv.error == null ? "nenhuma variante recebida" : multiPv.error;
         return EngineResult.error("Chess API REST: " + restError
-                + " | Stockfish Online: " + fallbackError
-                + " | Chess API WebSocket: " + socketError);
+                + " | Chess API WebSocket: " + socketError
+                + " | Stockfish Online: " + fallbackError);
+    }
+
+    private static EngineResult combineCandidateResults(EngineResult preferred,
+                                                        EngineResult additional, int limit) {
+        ArrayList<CandidateMove> combined = new ArrayList<>();
+        if (preferred != null && preferred.candidates != null) {
+            for (CandidateMove move : preferred.candidates) {
+                if (move != null) addOrUpdateCandidate(combined, move);
+            }
+        }
+        if (additional != null && additional.candidates != null) {
+            for (CandidateMove move : additional.candidates) {
+                if (move != null) addOrUpdateCandidate(combined, move);
+            }
+        }
+        if (combined.isEmpty()) return EngineResult.error("nenhuma variante combinável");
+
+        Collections.sort(combined, (left, right) ->
+                Double.compare(right.scoreForMover(), left.scoreForMover()));
+
+        CandidateMove best = null;
+        if (preferred != null && preferred.bestMove != null) {
+            for (CandidateMove move : combined) {
+                if (preferred.bestMove.equalsIgnoreCase(move.move)) {
+                    best = move;
+                    break;
+                }
+            }
+        }
+        if (best == null) best = combined.get(0);
+        combined.remove(best);
+        ArrayList<CandidateMove> selected = new ArrayList<>();
+        selected.add(best.withLabel("MELHOR"));
+        for (CandidateMove move : combined) {
+            if (selected.size() >= limit) break;
+            int index = selected.size();
+            double loss = best.scoreForMover() - move.scoreForMover();
+            String label = index == 1 ? (loss <= 0.75 ? "BOA" : "MEDIANA") : "MENOS BOA";
+            selected.add(move.withLabel(label));
+        }
+        return new EngineResult(best.move, best.evaluation, best.mate, null,
+                selected.toArray(new CandidateMove[0]));
     }
 
 
@@ -1201,6 +1256,18 @@ public final class ChessAssistantPatch {
             if (second != null) {
                 double loss = best.scoreForMover() - second.scoreForMover();
                 selected.add(second.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
+            }
+
+            CandidateMove third = null;
+            for (CandidateMove candidate : found) {
+                if (candidate != null && !candidate.move.equalsIgnoreCase(best.move)
+                        && (second == null || !candidate.move.equalsIgnoreCase(second.move))) {
+                    third = candidate;
+                    break;
+                }
+            }
+            if (third != null) {
+                selected.add(third.withLabel("MENOS BOA"));
             }
 
             CandidateMove[] candidates = selected.toArray(new CandidateMove[0]);
@@ -1385,7 +1452,7 @@ public final class ChessAssistantPatch {
                     selected.add(alternative.withLabel(loss <= 0.75 ? "BOA" : "MEDIANA"));
                 } else {
                     // Retain third/fourth deep lines for special-move classification.
-                    selected.add(alternative.withLabel("ANÁLISE PROFUNDA"));
+                    selected.add(alternative.withLabel("MENOS BOA"));
                 }
             }
 
@@ -1784,6 +1851,8 @@ public final class ChessAssistantPatch {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fromSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint toSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint bubblePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint bubbleTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private View board;
         private CandidateMove[] candidates = new CandidateMove[0];
         private double evaluation = 0.0;
@@ -1923,6 +1992,26 @@ public final class ChessAssistantPatch {
             arrowHead.close();
             paint.setStyle(Paint.Style.FILL);
             canvas.drawPath(arrowHead, paint);
+
+            String badge = special ? "ESPECIAL" : (index + 1) + " · " + candidate.label;
+            bubbleTextPaint.setColor(0xFFFFFFFF);
+            bubbleTextPaint.setTextSize(dp(getContext(), 9));
+            bubbleTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            float padX = dp(getContext(), 5);
+            float padY = dp(getContext(), 3);
+            float textWidth = bubbleTextPaint.measureText(badge);
+            float bubbleWidth = textWidth + padX * 2;
+            float bubbleHeight = dp(getContext(), 17);
+            float bubbleLeft = Math.max(left, Math.min(left + square * 8 - bubbleWidth,
+                    endX - bubbleWidth / 2.0f));
+            float bubbleTop = Math.max(top, Math.min(top + square * 8 - bubbleHeight,
+                    endY - bubbleHeight - dp(getContext(), 5)));
+            bubblePaint.setColor((color & 0x00FFFFFF) | 0xE6000000);
+            canvas.drawRoundRect(new RectF(bubbleLeft, bubbleTop,
+                    bubbleLeft + bubbleWidth, bubbleTop + bubbleHeight),
+                    dp(getContext(), 5), dp(getContext(), 5), bubblePaint);
+            canvas.drawText(badge, bubbleLeft + padX,
+                    bubbleTop + bubbleHeight - padY, bubbleTextPaint);
 
         }
 
