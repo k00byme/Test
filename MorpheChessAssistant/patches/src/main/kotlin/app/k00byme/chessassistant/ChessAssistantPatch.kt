@@ -64,6 +64,43 @@ val chessAssistantPatch = patch(
         // Dedicated Chess.com Play-vs-Bots activity.
         hookActivity("Lcom/chess/features/versusbots/game/BotGameActivityV2;")
 
-
+        // Game Review reports Chess.com's own per-move classification and mover color.
+        val classificationFingerprint = Fingerprint(
+            definingClass = "Lcom/chess/gamereview/v2/GameReviewActivity$c;",
+            name = "b0",
+            returnType = "V",
+            parameters = listOf(
+                "Lcom/chess/compengine/AnalysisMoveClassification;",
+                "Lcom/chess/entities/Color;"
+            ),
+            isStatic = false
+        )
+        val classificationMethod = classificationFingerprint.methodOrNull
+            ?: throw classificationFingerprint.patchException()
+        val classificationImplementation = classificationMethod.implementation
+            ?: throw IllegalStateException("Game Review classification callback has no DEX implementation")
+        val classificationParameterRegisters = classificationMethod.parameters.sumOf { parameter ->
+            if (parameter.type == "J" || parameter.type == "D") 2 else 1
+        }
+        val callbackRegister = classificationImplementation.registerCount
+            - classificationParameterRegisters - 1
+        require(callbackRegister >= 0) {
+            "Invalid callback register for GameReviewActivity classification hook"
+        }
+        val classificationHook = ImmutableMethodReference(
+            EXTENSION_CLASS,
+            "onOfficialClassification",
+            listOf("Ljava/lang/Object;", "Ljava/lang/Object;", "Ljava/lang/Object;"),
+            "V"
+        )
+        classificationMethod.addInstruction(
+            0,
+            BuilderInstruction3rc(
+                Opcode.INVOKE_STATIC_RANGE,
+                callbackRegister,
+                3,
+                classificationHook
+            )
+        )
     }
 }
