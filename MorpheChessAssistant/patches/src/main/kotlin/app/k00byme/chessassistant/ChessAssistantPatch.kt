@@ -12,7 +12,7 @@ private const val EXTENSION_CLASS = "Lapp/k00byme/chessassistant/extension/Chess
 @Suppress("unused")
 val chessAssistantPatch = patch(
     name = "Stockfish board assistant",
-    description = "Shows three distinct Stockfish MultiPV lines in bot games and standalone analysis; optional AUTO remains available against bots.",
+    description = "Shows three distinct Stockfish MultiPV lines in online games, bot games, and standalone analysis; optional AUTO remains available against bots.",
     default = true
 ) {
     compatibleWith(Constants.CHESS_COM_COMPATIBILITY)
@@ -63,6 +63,9 @@ val chessAssistantPatch = patch(
 
         // Dedicated Chess.com Play-vs-Bots activity.
         hookActivity("Lcom/chess/features/versusbots/game/BotGameActivityV2;")
+
+        // Real online games. Keep the same visual analysis overlay enabled here.
+        hookActivity("Lcom/chess/realchess/ui/game/RealGameActivity;")
 
         // Game Review reports Chess.com's own per-move classification and mover color.
         val classificationFingerprint = Fingerprint(
