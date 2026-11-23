@@ -194,18 +194,22 @@ public final class ChessAssistantPatch {
      */
     public static void onNativeMoveFeedback(Object position, Object score, Object variations,
                                             Object classification, int moveIndex, Object previousFeedback) {
-        if (classification == null) return;
-        String value = classification instanceof Enum
-                ? ((Enum<?>) classification).name()
-                : String.valueOf(classification);
-        value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
-        value = value.replace("MOVE_CLASSIFICATION_", "");
-        if ("GREAT_FIND".equals(value)) value = "GREAT";
-        if (value.isEmpty() || "NONE".equals(value) || "UNSPECIFIED".equals(value)) return;
+        try {
+            if (classification == null) return;
+            String value = classification instanceof Enum
+                    ? ((Enum<?>) classification).name()
+                    : String.valueOf(classification);
+            value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
+            value = value.replace("MOVE_CLASSIFICATION_", "");
+            if ("GREAT_FIND".equals(value)) value = "GREAT";
+            if (value.isEmpty() || "NONE".equals(value) || "UNSPECIFIED".equals(value)) return;
 
-        AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
-        if (overlay == null || overlay.closed) return;
-        overlay.showNativeFeedback(value, moveIndex);
+            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
+            if (overlay == null || overlay.closed) return;
+            overlay.showNativeFeedback(value, moveIndex);
+        } catch (Throwable ignored) {
+            // Feedback collection must never be able to break a game or its analysis.
+        }
     }
 
     /**
@@ -213,16 +217,20 @@ public final class ChessAssistantPatch {
      * the immediate feedback states used by Chess.com's coach/training flow.
      */
     public static void onBoardMoveFeedback(Object move, Object feedbackType) {
-        if (feedbackType == null) return;
-        String value = feedbackType instanceof Enum
-                ? ((Enum<?>) feedbackType).name()
-                : String.valueOf(feedbackType);
-        value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
-        if ("NONE".equals(value) || "MOVE".equals(value) || value.isEmpty()) return;
+        try {
+            if (feedbackType == null) return;
+            String value = feedbackType instanceof Enum
+                    ? ((Enum<?>) feedbackType).name()
+                    : String.valueOf(feedbackType);
+            value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
+            if ("NONE".equals(value) || "MOVE".equals(value) || value.isEmpty()) return;
 
-        AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
-        if (overlay == null || overlay.closed) return;
-        overlay.showBoardMoveFeedback(value);
+            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
+            if (overlay == null || overlay.closed) return;
+            overlay.showBoardMoveFeedback(value);
+        } catch (Throwable ignored) {
+            // Feedback collection must never be able to break a game or its analysis.
+        }
     }
 
     public static void install(Activity activity) {

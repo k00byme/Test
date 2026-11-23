@@ -147,8 +147,12 @@ val chessAssistantPatch = patch(
             ),
             "V"
         )
+        val nativeFeedbackReturnIndex = nativeFeedbackImplementation.instructions.count() - 1
+        require(nativeFeedbackReturnIndex >= 0) {
+            "nativeFeedback constructor has no return instruction"
+        }
         nativeFeedbackMethod.addInstruction(
-            0,
+            nativeFeedbackReturnIndex,
             BuilderInstruction3rc(
                 Opcode.INVOKE_STATIC_RANGE,
                 nativeFeedbackStartRegister,
@@ -185,8 +189,12 @@ val chessAssistantPatch = patch(
             listOf("Ljava/lang/Object;", "Ljava/lang/Object;"),
             "V"
         )
+        val boardMoveFeedbackReturnIndex = boardMoveFeedbackImplementation.instructions.count() - 1
+        require(boardMoveFeedbackReturnIndex >= 0) {
+            "boardMoveFeedback constructor has no return instruction"
+        }
         boardMoveFeedbackMethod.addInstruction(
-            0,
+            boardMoveFeedbackReturnIndex,
             BuilderInstruction3rc(
                 Opcode.INVOKE_STATIC_RANGE,
                 boardMoveFeedbackStartRegister,
