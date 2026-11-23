@@ -195,15 +195,14 @@ public final class ChessAssistantPatch {
     public static void onNativeMoveFeedbackObject(Object feedback) {
         try {
             if (feedback == null) return;
-            Field classificationField = feedback.getClass().getDeclaredField("d");
-            Field moveIndexField = feedback.getClass().getDeclaredField("e");
-            classificationField.setAccessible(true);
-            moveIndexField.setAccessible(true);
-            Object classification = classificationField.get(feedback);
-            Object indexValue = moveIndexField.get(feedback);
+            Object classification = readObjectField(feedback, "d");
+            Object indexValue = readObjectField(feedback, "e");
+            Object position = readObjectField(feedback, "a");
             int moveIndex = indexValue instanceof Number
                     ? ((Number) indexValue).intValue() : -1;
-            onNativeMoveFeedback(null, null, null, classification, moveIndex, null);
+            String destinationSquare = readLastMoveDestination(position);
+            String positionFen = readPositionFen(position);
+            dispatchNativeMoveFeedback(classification, moveIndex, destinationSquare, positionFen);
         } catch (Throwable ignored) {
             // Native feedback inspection must never affect Chess.com's analysis pipeline.
         }
@@ -215,6 +214,11 @@ public final class ChessAssistantPatch {
      */
     public static void onNativeMoveFeedback(Object position, Object score, Object variations,
                                             Object classification, int moveIndex, Object previousFeedback) {
+        dispatchNativeMoveFeedback(classification, moveIndex, "", "");
+    }
+
+    private static void dispatchNativeMoveFeedback(Object classification, int moveIndex,
+                                                   String destinationSquare, String positionFen) {
         try {
             if (classification == null) return;
             String value = classification instanceof Enum
@@ -227,10 +231,162 @@ public final class ChessAssistantPatch {
 
             AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
             if (overlay == null || overlay.closed) return;
-            overlay.showNativeFeedback(value, moveIndex);
+            overlay.showNativeFeedback(value, moveIndex, destinationSquare,
+                    annotationForClassification(value), positionFen);
         } catch (Throwable ignored) {
             // Feedback collection must never be able to break a game or its analysis.
         }
+    }
+
+    /** Chess.com's move classifications translated to standard PGN annotation glyphs. */
+    private static String annotationForClassification(String classification) {
+        switch (classification) {
+            case "BRILLIANT": return "!!";
+            case "GREAT": return "!";
+            case "TRICKY": return "!?";
+            case "EXCELLENT": return "!";
+            case "INACCURACY": return "?!";
+            case "MISTAKE": return "?";
+            case "BLUNDER": return "??";
+            case "MISS": return "?";
+            case "BOOK": return "□";
+            default: return "";
+        }
+    }
+
+    private static Field findInstanceField(Class<?> type, String name) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            try {
+                Field field = current.getDeclaredField(name);
+                field.setAccessible(true);
+                return field;
+            } catch (Throwable ignored) {
+                // Continue through the class hierarchy.
+            }
+        }
+        return null;
+    }
+
+    private static Object readObjectField(Object target, String name) {
+        if (target == null) return null;
+        try {
+            Field field = findInstanceField(target.getClass(), name);
+            return field == null ? null : field.get(target);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object invokeNoArg(Object target, String name) {
+        if (target == null) return null;
+        try {
+            Method method = target.getClass().getMethod(name);
+            method.setAccessible(true);
+            return method.invoke(target);
+        } catch (Throwable ignored) {
+            for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+                try {
+                    Method method = type.getDeclaredMethod(name);
+                    method.setAccessible(true);
+                    return method.invoke(target);
+                } catch (Throwable ignoredAgain) {
+                    // Try the next superclass.
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String readPositionFen(Object position) {
+        Object value = invokeNoArg(position, "o");
+        if (value instanceof String && isFen((String) value)) {
+            return ((String) value).trim();
+        }
+        return "";
+    }
+
+    /**
+     * PositionAnalysis returns the actual board position. Its h() history list ends
+     * with the move that produced the feedback; history/f.b is Chess.com's RawMove.
+     */
+    private static String readLastMoveDestination(Object position) {
+        Object history = invokeNoArg(position, "h");
+        if (!(history instanceof List)) return "";
+        List<?> moves = (List<?>) history;
+        if (moves.isEmpty()) return "";
+        Object lastHistoryItem = moves.get(moves.size() - 1);
+        Object rawMove = readObjectField(lastHistoryItem, "b");
+        if (rawMove == null) rawMove = lastHistoryItem;
+
+        List<Object> squares = new ArrayList<>();
+        List<Object> visited = new ArrayList<>();
+        collectBoardSquares(rawMove, squares, visited, 0);
+        if (squares.isEmpty()) return "";
+        return squareToAlgebraic(squares.get(squares.size() - 1));
+    }
+
+    private static void collectBoardSquares(Object value, List<Object> squares,
+                                            List<Object> visited, int depth) {
+        if (value == null || depth > 3) return;
+        for (Object item : visited) if (item == value) return;
+        visited.add(value);
+
+        if (isBoardSquare(value)) {
+            squares.add(value);
+            return;
+        }
+
+        for (Class<?> type = value.getClass(); type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                        || field.getType().isPrimitive()
+                        || field.getType() == String.class
+                        || field.getType().isEnum()) continue;
+                try {
+                    field.setAccessible(true);
+                    Object nested = field.get(value);
+                    if (nested instanceof Iterable) {
+                        for (Object element : (Iterable<?>) nested) {
+                            collectBoardSquares(element, squares, visited, depth + 1);
+                        }
+                    } else if (nested != null && !nested.getClass().isArray()) {
+                        collectBoardSquares(nested, squares, visited, depth + 1);
+                    }
+                } catch (Throwable ignored) {
+                    // Reflection is best-effort; it must not interfere with gameplay.
+                }
+            }
+        }
+    }
+
+    private static boolean isBoardSquare(Object value) {
+        if (value == null) return false;
+        if ("com.chess.chessboard.s".equals(value.getClass().getName())) return true;
+        Field file = findInstanceField(value.getClass(), "a");
+        Field rank = findInstanceField(value.getClass(), "b");
+        return file != null && rank != null
+                && file.getType().getName().endsWith("BoardFile")
+                && file.getType().getName().endsWith("BoardRank") == false
+                && rank.getType().getName().endsWith("BoardRank");
+    }
+
+    private static String squareToAlgebraic(Object square) {
+        Object file = readObjectField(square, "a");
+        Object rank = readObjectField(square, "b");
+        Object fileLabel = readObjectField(file, "displayName");
+        Object rankValue = readObjectField(rank, "row");
+
+        String fileText = fileLabel instanceof String
+                ? ((String) fileLabel).trim().toLowerCase(java.util.Locale.US) : "";
+        String rankText = rankValue instanceof Number
+                ? String.valueOf(((Number) rankValue).intValue()) : "";
+
+        if (fileText.length() > 1) fileText = fileText.substring(0, 1);
+        if (fileText.length() == 1 && fileText.charAt(0) >= 'a' && fileText.charAt(0) <= 'h'
+                && rankText.matches("[1-8]")) {
+            return fileText + rankText;
+        }
+        return "";
     }
 
     /**
@@ -323,6 +479,7 @@ public final class ChessAssistantPatch {
         private String analysisSummary = "";
         private String specialMessage = "";
         private String specialMove = "";
+        private String nativeFeedbackFen = "";
 
         AnalysisOverlay(Activity activity) {
             super(activity);
@@ -438,10 +595,14 @@ public final class ChessAssistantPatch {
             super.onDetachedFromWindow();
         }
 
-        private void showNativeFeedback(String classification, int moveIndex) {
+        private void showNativeFeedback(String classification, int moveIndex,
+                                         String destinationSquare, String symbol, String positionFen) {
             MAIN.post(() -> {
                 if (closed || !isAttachedToWindow()) return;
+                nativeFeedbackFen = positionFen == null ? "" : positionFen;
+                drawing.setNativeFeedback(symbol, destinationSquare);
                 String label = "FEEDBACK DO LANCE · " + classification;
+                if (symbol != null && !symbol.isEmpty()) label += " (" + symbol + ")";
                 if (moveIndex > 0) label += " · #" + moveIndex;
                 feedbackPanel.setText(label);
                 feedbackPanel.setVisibility(View.VISIBLE);
@@ -514,6 +675,10 @@ public final class ChessAssistantPatch {
 
             drawing.setBoard(found);
             positionAutoButton(found);
+            if (!nativeFeedbackFen.isEmpty() && !nativeFeedbackFen.equals(fen)) {
+                nativeFeedbackFen = "";
+                drawing.setNativeFeedback("", "");
+            }
             if (!fen.equals(activeFen)) {
                 cancelCurrentAnalysis();
                 activeFen = fen;
@@ -539,6 +704,8 @@ public final class ChessAssistantPatch {
             specialMove = "";
             specialRequestedFen = "";
             drawing.setSpecialMove("");
+            nativeFeedbackFen = "";
+            drawing.setNativeFeedback("", "");
             drawing.setEngine(candidates, evaluation, mate, boardView != null && isBoardFlipped(boardView));
         }
 
@@ -2173,6 +2340,8 @@ public final class ChessAssistantPatch {
         private int mate = 0;
         private boolean flipped;
         private String specialMove = "";
+        private String nativeFeedbackSymbol = "";
+        private String nativeFeedbackSquare = "";
 
         BoardDrawing(Context context) {
             super(context);
@@ -2195,6 +2364,12 @@ public final class ChessAssistantPatch {
             evaluation = eval;
             mate = mateIn;
             flipped = isFlipped;
+            invalidate();
+        }
+
+        void setNativeFeedback(String symbol, String square) {
+            nativeFeedbackSymbol = symbol == null ? "" : symbol;
+            nativeFeedbackSquare = square == null ? "" : square;
             invalidate();
         }
 
@@ -2231,8 +2406,6 @@ public final class ChessAssistantPatch {
                     left - barGap, top + size * (1.0f - normalized),
                     dp(getContext(), 2), dp(getContext(), 2), paint);
 
-            if (candidates.length == 0) return;
-
             // Weaker alternatives are painted first; the best move remains on top.
             for (int i = candidates.length - 1; i >= 0; i--) {
                 drawCandidate(canvas, candidates[i], i, left, top, square, false);
@@ -2242,6 +2415,58 @@ public final class ChessAssistantPatch {
                         specialMove, evaluation, mate, SPECIAL_ENGINE_DEPTH, false, "ESPECIAL");
                 drawCandidate(canvas, exceptional, 0, left, top, square, true);
             }
+            drawNativeFeedbackMarker(canvas, left, top, square);
+        }
+
+        private void drawNativeFeedbackMarker(Canvas canvas, float left, float top, float square) {
+            if (nativeFeedbackSymbol.isEmpty() || nativeFeedbackSquare.length() != 2) return;
+            char file = nativeFeedbackSquare.charAt(0);
+            char rank = nativeFeedbackSquare.charAt(1);
+            if (file < 'a' || file > 'h' || rank < '1' || rank > '8') return;
+
+            int boardFile = file - 'a';
+            int boardRank = rank - '1';
+            int column = flipped ? 7 - boardFile : boardFile;
+            int row = flipped ? boardRank : 7 - boardRank;
+            float cellLeft = left + column * square;
+            float cellTop = top + row * square;
+
+            bubbleTextPaint.setColor(0xFFFFFFFF);
+            bubbleTextPaint.setTypeface(Typeface.create("sans-serif-black", Typeface.BOLD));
+            bubbleTextPaint.setTextSize(Math.max(dp(getContext(), 12), square * 0.26f));
+            float padX = Math.max(dp(getContext(), 4), square * 0.055f);
+            float padY = Math.max(dp(getContext(), 2), square * 0.025f);
+            float textWidth = bubbleTextPaint.measureText(nativeFeedbackSymbol);
+            float bubbleWidth = textWidth + padX * 2.0f;
+            float bubbleHeight = Math.max(dp(getContext(), 19), square * 0.31f);
+            float bubbleLeft = cellLeft + square * 0.50f;
+            if (bubbleLeft + bubbleWidth > left + square * 8.0f) {
+                bubbleLeft = cellLeft + square * 0.50f - bubbleWidth;
+            }
+            bubbleLeft = Math.max(left + dp(getContext(), 1),
+                    Math.min(left + square * 8.0f - bubbleWidth - dp(getContext(), 1), bubbleLeft));
+            float bubbleTop = cellTop + square * 0.02f;
+            bubbleTop = Math.max(top, Math.min(top + square * 8.0f - bubbleHeight, bubbleTop));
+
+            int color;
+            switch (nativeFeedbackSymbol) {
+                case "!!": color = 0xFF258653; break;
+                case "!": color = 0xFF268A58; break;
+                case "!?": color = 0xFF357DC2; break;
+                case "?!": color = 0xFFD49A2D; break;
+                case "?": color = 0xFFE1842D; break;
+                case "??": color = 0xFFD34646; break;
+                case "□": color = 0xFF667080; break;
+                default: color = 0xFF45515F;
+            }
+            bubblePaint.setColor(0xF0000000 | (color & 0x00FFFFFF));
+            canvas.drawRoundRect(new RectF(bubbleLeft, bubbleTop,
+                    bubbleLeft + bubbleWidth, bubbleTop + bubbleHeight),
+                    dp(getContext(), 6), dp(getContext(), 6), bubblePaint);
+            bubbleTextPaint.setColor(0xFFFFFFFF);
+            Paint.FontMetrics metrics = bubbleTextPaint.getFontMetrics();
+            float baseline = bubbleTop + (bubbleHeight - metrics.ascent - metrics.descent) / 2.0f;
+            canvas.drawText(nativeFeedbackSymbol, bubbleLeft + padX, baseline, bubbleTextPaint);
         }
 
         private void drawCandidate(Canvas canvas, CandidateMove candidate, int index,
