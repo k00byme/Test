@@ -5,6 +5,12 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.patch.patch
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction3rc
+import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction35c
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.formats.FiveRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.formats.RegisterRangeInstruction
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodReference
 
 private const val EXTENSION_CLASS = "Lapp/k00byme/chessassistant/extension/ChessAssistantPatch;"
@@ -106,100 +112,204 @@ val chessAssistantPatch = patch(
             )
         )
 
-        // Native move feedback from Chess.com's shared local PositionAnalysis pipeline.
-        // PositionAnalysis$b is PlayerMoveFeedback(position, score, lines, classification, ...).
+        // Intercept Chess.com's completed PlayerMoveFeedback result instead of
+        // executing extension code from inside the app's data-class constructor.
         val nativeFeedbackFingerprint = Fingerprint(
-            definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis\$b;",
-            name = "<init>",
-            returnType = "V",
+            definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis;",
+            name = "c",
+            returnType = "Lcom/chess/analysis/enginelocal/PositionAnalysis\$b;",
             parameters = listOf(
                 "Lcom/chess/chessboard/variants/e;",
-                "Lcom/chess/entities/Score;",
-                "Ljava/util/List;",
-                "Lcom/chess/compengine/AnalysisMoveClassification;",
-                "I",
-                "Lcom/chess/analysis/enginelocal/PositionAnalysis\$c;"
+                "Ljava/util/List;"
             ),
-            isStatic = false
+            isStatic = true
         )
         val nativeFeedbackMethod = nativeFeedbackFingerprint.methodOrNull
             ?: throw nativeFeedbackFingerprint.patchException()
         val nativeFeedbackImplementation = nativeFeedbackMethod.implementation
-            ?: throw IllegalStateException("PlayerMoveFeedback constructor has no DEX implementation")
-        // This constructor has six one-word explicit parameters. DEX stores
-        // the receiver in the preceding register, so the invoke range begins at v2
-        // for the target Chess.com build (registerCount=8, ins_size=7).
-        val nativeFeedbackStartRegister = nativeFeedbackImplementation.registerCount - 6
-        require(nativeFeedbackStartRegister == 2
-            && nativeFeedbackStartRegister + 6 <= nativeFeedbackImplementation.registerCount) {
-            "Unexpected PlayerMoveFeedback register layout"
-        }
+            ?: throw IllegalStateException("PositionAnalysis.c has no DEX implementation")
         val nativeFeedbackHook = ImmutableMethodReference(
             EXTENSION_CLASS,
-            "onNativeMoveFeedback",
-            listOf(
-                "Ljava/lang/Object;",
-                "Ljava/lang/Object;",
-                "Ljava/lang/Object;",
-                "Ljava/lang/Object;",
-                "I",
-                "Ljava/lang/Object;"
-            ),
+            "onNativeMoveFeedbackObject",
+            listOf("Ljava/lang/Object;"),
             "V"
         )
-        val nativeFeedbackReturnIndex = nativeFeedbackImplementation.instructions.count() - 1
-        require(nativeFeedbackReturnIndex >= 0) {
-            "nativeFeedback constructor has no return instruction"
+        val nativeFeedbackReturns = nativeFeedbackImplementation.instructions
+            .mapIndexedNotNull { index, instruction ->
+                if (instruction.opcode == Opcode.RETURN_OBJECT) {
+                    val returnRegister = (instruction as? OneRegisterInstruction)?.registerA
+                        ?: throw IllegalStateException("PositionAnalysis.c has an invalid object return")
+                    index to returnRegister
+                } else {
+                    null
+                }
+            }
+        require(nativeFeedbackReturns.isNotEmpty()) {
+            "PositionAnalysis.c has no object return instructions"
         }
-        nativeFeedbackMethod.addInstruction(
-            nativeFeedbackReturnIndex,
-            BuilderInstruction3rc(
-                Opcode.INVOKE_STATIC_RANGE,
-                nativeFeedbackStartRegister,
-                6,
-                nativeFeedbackHook
+        nativeFeedbackReturns.sortedByDescending { it.first }.forEach { (index, register) ->
+            nativeFeedbackMethod.addInstruction(
+                index,
+                BuilderInstruction3rc(
+                    Opcode.INVOKE_STATIC_RANGE,
+                    register,
+                    1,
+                    nativeFeedbackHook
+                )
             )
-        )
-        // Immediate board feedback used by Chess.com's coach/training move flow.
-        val boardMoveFeedbackFingerprint = Fingerprint(
-            definingClass = "Lcom/chess/chessboard/vm/movesinput/c0;",
-            name = "<init>",
-            returnType = "V",
-            parameters = listOf(
-                "Lcom/chess/chessboard/l;",
-                "Lcom/chess/entities/FeedbackType;"
-            ),
-            isStatic = false
-        )
-        val boardMoveFeedbackMethod = boardMoveFeedbackFingerprint.methodOrNull
-            ?: throw boardMoveFeedbackFingerprint.patchException()
-        val boardMoveFeedbackImplementation = boardMoveFeedbackMethod.implementation
-            ?: throw IllegalStateException("Board MoveFeedback constructor has no DEX implementation")
-        // This constructor has two one-word explicit parameters; its receiver
-        // occupies the preceding register. The target build uses v2-v3.
-        val boardMoveFeedbackStartRegister = boardMoveFeedbackImplementation.registerCount - 2
-        require(boardMoveFeedbackStartRegister == 2
-            && boardMoveFeedbackStartRegister + 2 <= boardMoveFeedbackImplementation.registerCount) {
-            "Unexpected board MoveFeedback register layout"
         }
+
+        // Intercept board MoveFeedback immediately after each constructor call.
+        // No extension code runs inside Chess.com's constructors or static initialization.
         val boardMoveFeedbackHook = ImmutableMethodReference(
             EXTENSION_CLASS,
             "onBoardMoveFeedback",
             listOf("Ljava/lang/Object;", "Ljava/lang/Object;"),
             "V"
         )
-        val boardMoveFeedbackReturnIndex = boardMoveFeedbackImplementation.instructions.count() - 1
-        require(boardMoveFeedbackReturnIndex >= 0) {
-            "boardMoveFeedback constructor has no return instruction"
+        val boardMoveFeedbackClass = "Lcom/chess/chessboard/vm/movesinput/c0;"
+        val boardMoveFeedbackParameters = listOf(
+            "Lcom/chess/chessboard/l;",
+            "Lcom/chess/entities/FeedbackType;"
+        )
+
+        fun hookBoardMoveFeedbackCalls(
+            className: String,
+            methodName: String,
+            returnType: String,
+            parameters: List<String>
+        ) {
+            val fingerprint = Fingerprint(
+                definingClass = className,
+                name = methodName,
+                returnType = returnType,
+                parameters = parameters,
+                isStatic = false
+            )
+            val method = fingerprint.methodOrNull ?: throw fingerprint.patchException()
+            val implementation = method.implementation
+                ?: throw IllegalStateException("$className->$methodName has no DEX implementation")
+
+            val callSites = implementation.instructions.mapIndexedNotNull { index, instruction ->
+                val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                if ((instruction.opcode == Opcode.INVOKE_DIRECT
+                            || instruction.opcode == Opcode.INVOKE_DIRECT_RANGE)
+                    && reference != null
+                    && reference.definingClass == boardMoveFeedbackClass
+                    && reference.name == "<init>"
+                    && reference.returnType == "V"
+                    && reference.parameterTypes.map { it.toString() } == boardMoveFeedbackParameters
+                ) {
+                    index to instruction
+                } else {
+                    null
+                }
+            }
+            require(callSites.isNotEmpty()) {
+                "No board MoveFeedback constructor call found in $className->$methodName"
+            }
+
+            callSites.sortedByDescending { it.first }.forEach { (index, instruction) ->
+                val hookInstruction = when (instruction) {
+                    is FiveRegisterInstruction -> {
+                        require(instruction.registerCount == 3) {
+                            "Unexpected board MoveFeedback argument count in $className->$methodName"
+                        }
+                        BuilderInstruction35c(
+                            Opcode.INVOKE_STATIC,
+                            2,
+                            instruction.registerD,
+                            instruction.registerE,
+                            0,
+                            0,
+                            0,
+                            boardMoveFeedbackHook
+                        )
+                    }
+                    is RegisterRangeInstruction -> {
+                        require(instruction.registerCount == 3) {
+                            "Unexpected board MoveFeedback range in $className->$methodName"
+                        }
+                        BuilderInstruction3rc(
+                            Opcode.INVOKE_STATIC_RANGE,
+                            instruction.startRegister + 1,
+                            2,
+                            boardMoveFeedbackHook
+                        )
+                    }
+                    else -> throw IllegalStateException(
+                        "Unsupported board MoveFeedback invoke format in $className->$methodName"
+                    )
+                }
+                method.addInstruction(index + 1, hookInstruction)
+            }
         }
-        boardMoveFeedbackMethod.addInstruction(
-            boardMoveFeedbackReturnIndex,
-            BuilderInstruction3rc(
-                Opcode.INVOKE_STATIC_RANGE,
-                boardMoveFeedbackStartRegister,
-                2,
-                boardMoveFeedbackHook
+
+        // Chessboard move-input / PGN pipeline, including every callsite in this method.
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/chessboard/vm/variants/pgn/a;",
+            "f",
+            "V",
+            listOf(
+                "Lcom/chess/chessboard/l;",
+                "Lcom/chess/chessboard/vm/movesinput/MoveVerification;",
+                "Z"
             )
         )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/diagrams/puzzle/DiagramPuzzleViewModel;",
+            "h3",
+            "V",
+            listOf("I", "Lcom/chess/chessboard/l;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/diagrams/puzzle/DiagramPuzzleViewModel;",
+            "q0",
+            "V",
+            listOf("Z", "I", "Lcom/chess/chessboard/pgn/b;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/features/analysis/standalone/u;",
+            "invoke",
+            "Ljava/lang/Object;",
+            listOf("Ljava/lang/Object;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/features/puzzles/battle/BattleProblemViewModel;",
+            "h3",
+            "V",
+            listOf("I", "Lcom/chess/chessboard/l;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/features/puzzles/battle/BattleProblemViewModel;",
+            "q0",
+            "V",
+            listOf("Z", "I", "Lcom/chess/chessboard/pgn/b;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/features/puzzles/utils/PuzzlesUtilsKt\$bindMoveFeedback\$1\$1\$a;",
+            "emit",
+            "Ljava/lang/Object;",
+            listOf("Ljava/lang/Object;", "Lcom/google/android/gy0;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/features/reactnativeapps/o;",
+            "l",
+            "V",
+            listOf("Ljava/lang/String;", "Ljava/lang/String;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/features/lessons/challenge/LessonChallengesViewModel;",
+            "P4",
+            "V",
+            listOf("Lcom/chess/features/lessons/challenge/l;")
+        )
+        hookBoardMoveFeedbackCalls(
+            "Lcom/chess/solo/practice/SoloChessboardStateHolderKt\$SoloGameChessboard\$2\$1;",
+            "invokeSuspend",
+            "Ljava/lang/Object;",
+            listOf("Ljava/lang/Object;")
+        )
+
     }
 }
