@@ -258,7 +258,7 @@ public final class ChessAssistantPatch {
         private volatile boolean requestInFlight;
         private volatile boolean closed;
         private Future<?> analysisTask;
-        private long requestSequence;
+        private volatile long requestSequence;
         private String failedFen = "";
         private int connectionFailureCount;
         private long retryAfterElapsedRealtime;

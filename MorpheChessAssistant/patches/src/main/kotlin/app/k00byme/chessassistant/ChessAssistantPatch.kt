@@ -109,7 +109,7 @@ val chessAssistantPatch = patch(
         // Native move feedback from Chess.com's shared local PositionAnalysis pipeline.
         // PositionAnalysis$b is PlayerMoveFeedback(position, score, lines, classification, ...).
         val nativeFeedbackFingerprint = Fingerprint(
-            definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis\\$b;",
+            definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis\$b;",
             name = "<init>",
             returnType = "V",
             parameters = listOf(
@@ -118,7 +118,7 @@ val chessAssistantPatch = patch(
                 "Ljava/util/List;",
                 "Lcom/chess/compengine/AnalysisMoveClassification;",
                 "I",
-                "Lcom/chess/analysis/enginelocal/PositionAnalysis\\$c;"
+                "Lcom/chess/analysis/enginelocal/PositionAnalysis\$c;"
             ),
             isStatic = false
         )
