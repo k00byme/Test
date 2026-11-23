@@ -245,7 +245,7 @@ public final class ChessAssistantPatch {
         }
     }
 
-    private static Field findInstanceField    private static Field findInstanceField(Class<?> type, String name) {
+    private static Field findInstanceField(Class<?> type, String name) {
         for (Class<?> current = type; current != null; current = current.getSuperclass()) {
             try {
                 Field field = current.getDeclaredField(name);
