@@ -105,5 +105,56 @@ val chessAssistantPatch = patch(
                 classificationHook
             )
         )
+
+        // Native move feedback from Chess.com's shared local PositionAnalysis pipeline.
+        // PositionAnalysis$b is PlayerMoveFeedback(position, score, lines, classification, ...).
+        val nativeFeedbackFingerprint = Fingerprint(
+            definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis\\$b;",
+            name = "<init>",
+            returnType = "V",
+            parameters = listOf(
+                "Lcom/chess/chessboard/variants/e;",
+                "Lcom/chess/entities/Score;",
+                "Ljava/util/List;",
+                "Lcom/chess/compengine/AnalysisMoveClassification;",
+                "I",
+                "Lcom/chess/analysis/enginelocal/PositionAnalysis\\$c;"
+            ),
+            isStatic = false
+        )
+        val nativeFeedbackMethod = nativeFeedbackFingerprint.methodOrNull
+            ?: throw nativeFeedbackFingerprint.patchException()
+        val nativeFeedbackImplementation = nativeFeedbackMethod.implementation
+            ?: throw IllegalStateException("PlayerMoveFeedback constructor has no DEX implementation")
+        val nativeFeedbackParameterRegisters = nativeFeedbackMethod.parameters.sumOf { parameter ->
+            if (parameter.type == "J" || parameter.type == "D") 2 else 1
+        }
+        val nativeFeedbackStartRegister = nativeFeedbackImplementation.registerCount
+            - nativeFeedbackParameterRegisters
+        require(nativeFeedbackStartRegister >= 0) {
+            "Invalid parameter register for PlayerMoveFeedback constructor"
+        }
+        val nativeFeedbackHook = ImmutableMethodReference(
+            EXTENSION_CLASS,
+            "onNativeMoveFeedback",
+            listOf(
+                "Ljava/lang/Object;",
+                "Ljava/lang/Object;",
+                "Ljava/lang/Object;",
+                "Ljava/lang/Object;",
+                "I",
+                "Ljava/lang/Object;"
+            ),
+            "V"
+        )
+        nativeFeedbackMethod.addInstruction(
+            0,
+            BuilderInstruction3rc(
+                Opcode.INVOKE_STATIC_RANGE,
+                nativeFeedbackStartRegister,
+                6,
+                nativeFeedbackHook
+            )
+        )
     }
 }

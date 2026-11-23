@@ -4,21 +4,21 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 
 ## Supported screens
 
-- **Online human games:** `RealGameActivity`. The evaluation panel and two visual move suggestions are available; automatic move execution is disabled.
+- **Online human games:** `RealGameActivity`. The evaluation panel and up to three visual move suggestions are available; automatic move execution is disabled.
 - **Play vs Bots:** `BotGameActivityV2`. The evaluation panel, move suggestions, and optional AUTO control are available.
 - **Standalone analysis:** `StandaloneAnalysisActivityV2`.
 
 ## Move assistance
 
 - Stockfish evaluation panel.
-- Up to two analyzed MultiPV candidate moves: the engine's final top line and its second line.
+- Up to three analyzed MultiPV candidate moves: best, good/medium, and less favorable.
 - Green arrow for the final best line; yellow arrow for the second alternative.
 - Blue origin-square highlight and destination highlight matching each arrow.
-- No third / worst-move arrow or ordinary move badges; the separate special-alert panel has its own descriptive text.
+- The third line is shown in red. Native Chess.com move feedback is surfaced when the app's PlayerMoveFeedback pipeline emits a classification.
 - Board orientation handling and stale-overlay clearing.
 - Visual assistance remains enabled on supported online game screens and in post-game analysis. AUTO never sends moves in human-vs-human games.
 
-The normal engine request uses depth 12, up to two variants, and a 100 ms thinking-time setting. The completed Chess API HTTPS response is the primary source, and its top-level `move` field remains authoritative for the green recommendation. If that request fails, the patch immediately tries Stockfish Online on a separate host; only after that does it try the Chess API WebSocket as a final MultiPV fallback. This avoids spending the full WebSocket timeout on the same host before reaching the independent fallback provider.
+The normal engine request uses depth 12, up to three variants, and a 100 ms thinking-time setting. Chess API REST, Chess API WebSocket, and Stockfish Online run concurrently; valid partial lines are combined instead of discarded, with a bounded collection window of approximately 6.5 seconds. The completed Chess API HTTPS response is the primary source, and its top-level `move` field remains authoritative for the green recommendation. The REST top-level move remains authoritative when present; WebSocket supplies additional MultiPV lines, while Stockfish Online is the independent emergency fallback. This avoids spending the full WebSocket timeout on the same host before reaching the independent fallback provider.
 
 ## Rare special assistance
 
@@ -36,7 +36,7 @@ The player's color is read from exposed activity/board metadata when available, 
 
 ## Engine connectivity and privacy
 
-The normal move assistance tries `https://chess-api.com/v1` over HTTPS first and treats its top-level `move` field as authoritative for the green recommendation. On failure it immediately tries `https://stockfish.online/api/s/v2.php` on a separate host; that fallback provides one best move. The Chess API WebSocket is the final fallback and now performs TLS using the explicit hostname for SNI/certificate validation. Failed positions are retried automatically after 3, 6, 12, and then 30 seconds, while a newly detected position is analyzed immediately. The deeper special-analysis request also uses HTTPS before WebSocket. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
+The normal move assistance tries `https://chess-api.com/v1` over HTTPS first and treats its top-level `move` field as authoritative for the green recommendation. On failure it immediately tries `https://stockfish.online/api/s/v2.php` on a separate host; that fallback provides one best move. The Chess API WebSocket performs TLS using the explicit hostname for SNI/certificate validation. A changed board position cancels the prior collection task so stale requests do not block the next move. Failed positions are retried automatically after 3, 6, 12, and then 30 seconds, while a newly detected position is analyzed immediately. The deeper special-analysis request also uses HTTPS before WebSocket. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
 
 ## Compatibility and build
 
@@ -47,3 +47,8 @@ The GitHub Actions workflow **Build Morphe Chess Assistant** runs `gradle buildA
 ## Verification status
 
 The patch source is compiled by GitHub Actions. Automatic touch delivery, control placement, the random delay, online overlay rendering, candidate timing, and bot-side color detection still require runtime confirmation on an Android device. Successful compilation alone does not prove runtime behavior.
+
+
+## Native Chess.com move feedback
+
+The patch hooks the native `PositionAnalysis$b` (`PlayerMoveFeedback`) constructor and forwards Chess.com's original `AnalysisMoveClassification` to the overlay. This is separate from the Game Review callback, which remains installed for post-game classifications. The feedback overlay is attached to the bot, online RealGameActivity, and standalone analysis screens. Whether the app emits a native feedback event in each mode depends on its own runtime feature/state and must be confirmed on-device.
