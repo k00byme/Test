@@ -1438,6 +1438,15 @@ public final class ChessAssistantPatch {
 
         if (normal != null && normal.length > 0) {
             double quickBest = normal[0].scoreForMover();
+
+            // Preserve the independent purple deep-search line even when it is not
+            // classified as a tactical "special finding". If a different deep move
+            // evaluates better than the fast green recommendation, show it for review.
+            if (!first.move.equalsIgnoreCase(normal[0].move)
+                    && best > quickBest + 0.10) {
+                return new SpecialFinding(first, "MELHOR LINHA — BUSCA PROFUNDA",
+                        "A busca mais profunda encontrou uma alternativa com avaliação superior à sugestão rápida.");
+            }
             boolean firstIsDifferent = !first.move.equalsIgnoreCase(normal[0].move);
 
             if (best >= 0.85 && best - quickBest >= 0.65
