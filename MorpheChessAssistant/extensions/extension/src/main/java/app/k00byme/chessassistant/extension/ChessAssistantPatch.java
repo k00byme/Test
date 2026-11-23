@@ -315,14 +315,78 @@ public final class ChessAssistantPatch {
         List<?> moves = (List<?>) history;
         if (moves.isEmpty()) return "";
         Object lastHistoryItem = moves.get(moves.size() - 1);
+
+        // history/f.a is the position before the move; feedback.a is the position after it.
+        String previousFen = readPositionFen(readObjectField(lastHistoryItem, "a"));
+        String currentFen = readPositionFen(position);
+        String destination = destinationFromFenDiff(previousFen, currentFen);
+        if (!destination.isEmpty()) return destination;
+
+        // Fallback for Chess.com move implementations that expose their endpoint squares.
         Object rawMove = readObjectField(lastHistoryItem, "b");
         if (rawMove == null) rawMove = lastHistoryItem;
-
         List<Object> squares = new ArrayList<>();
         List<Object> visited = new ArrayList<>();
         collectBoardSquares(rawMove, squares, visited, 0);
-        if (squares.isEmpty()) return "";
-        return squareToAlgebraic(squares.get(squares.size() - 1));
+        if (squares.size() >= 2) return squareToAlgebraic(squares.get(squares.size() - 1));
+        if (squares.size() == 1) return squareToAlgebraic(squares.get(0));
+
+        Matcher matcher = Pattern.compile("[a-h][1-8]").matcher(String.valueOf(rawMove));
+        String lastSquare = "";
+        while (matcher.find()) lastSquare = matcher.group();
+        return lastSquare;
+    }
+
+    private static String destinationFromFenDiff(String previousFen, String currentFen) {
+        char[][] previous = parseFenBoard(previousFen);
+        char[][] current = parseFenBoard(currentFen);
+        if (previous == null || current == null) return "";
+
+        String kingDestination = "";
+        List<String> occupiedChanges = new ArrayList<>();
+        for (int row = 0; row < 8; row++) {
+            for (int column = 0; column < 8; column++) {
+                char before = previous[row][column];
+                char after = current[row][column];
+                if (before == after || after == '.') continue;
+
+                String square = String.valueOf((char) ('a' + column))
+                        + (char) ('8' - row);
+                occupiedChanges.add(square);
+                if (Character.toLowerCase(after) == 'k') kingDestination = square;
+            }
+        }
+
+        // Castling changes both the king and rook destinations; the played move ends at the king.
+        if (!kingDestination.isEmpty()) return kingDestination;
+        if (occupiedChanges.size() == 1) return occupiedChanges.get(0);
+        return occupiedChanges.isEmpty() ? "" : occupiedChanges.get(occupiedChanges.size() - 1);
+    }
+
+    private static char[][] parseFenBoard(String fen) {
+        if (!isFen(fen)) return null;
+        String[] fields = fen.trim().split("\\s+");
+        String[] ranks = fields[0].split("/");
+        if (ranks.length != 8) return null;
+
+        char[][] board = new char[8][8];
+        for (int row = 0; row < 8; row++) {
+            int column = 0;
+            for (int i = 0; i < ranks[row].length(); i++) {
+                char token = ranks[row].charAt(i);
+                if (token >= '1' && token <= '8') {
+                    int empty = token - '0';
+                    while (empty-- > 0 && column < 8) board[row][column++] = '.';
+                } else if (token >= 'a' && token <= 'z' || token >= 'A' && token <= 'Z') {
+                    if (column >= 8) return null;
+                    board[row][column++] = token;
+                } else {
+                    return null;
+                }
+            }
+            if (column != 8) return null;
+        }
+        return board;
     }
 
     private static void collectBoardSquares(Object value, List<Object> squares,
@@ -366,7 +430,6 @@ public final class ChessAssistantPatch {
         Field rank = findInstanceField(value.getClass(), "b");
         return file != null && rank != null
                 && file.getType().getName().endsWith("BoardFile")
-                && file.getType().getName().endsWith("BoardRank") == false
                 && rank.getType().getName().endsWith("BoardRank");
     }
 
@@ -675,10 +738,6 @@ public final class ChessAssistantPatch {
 
             drawing.setBoard(found);
             positionAutoButton(found);
-            if (!nativeFeedbackFen.isEmpty() && !nativeFeedbackFen.equals(fen)) {
-                nativeFeedbackFen = "";
-                drawing.setNativeFeedback("", "");
-            }
             if (!fen.equals(activeFen)) {
                 cancelCurrentAnalysis();
                 activeFen = fen;
@@ -704,8 +763,10 @@ public final class ChessAssistantPatch {
             specialMove = "";
             specialRequestedFen = "";
             drawing.setSpecialMove("");
-            nativeFeedbackFen = "";
-            drawing.setNativeFeedback("", "");
+            if (nativeFeedbackFen.isEmpty() || !nativeFeedbackFen.equals(activeFen)) {
+                nativeFeedbackFen = "";
+                drawing.setNativeFeedback("", "");
+            }
             drawing.setEngine(candidates, evaluation, mate, boardView != null && isBoardFlipped(boardView));
         }
 
