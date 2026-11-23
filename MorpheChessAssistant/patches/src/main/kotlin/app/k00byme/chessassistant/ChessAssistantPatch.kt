@@ -156,5 +156,43 @@ val chessAssistantPatch = patch(
                 nativeFeedbackHook
             )
         )
+        // Immediate board feedback used by Chess.com's coach/training move flow.
+        val boardMoveFeedbackFingerprint = Fingerprint(
+            definingClass = "Lcom/chess/chessboard/vm/movesinput/c0;",
+            name = "<init>",
+            returnType = "V",
+            parameters = listOf(
+                "Lcom/chess/chessboard/l;",
+                "Lcom/chess/entities/FeedbackType;"
+            ),
+            isStatic = false
+        )
+        val boardMoveFeedbackMethod = boardMoveFeedbackFingerprint.methodOrNull
+            ?: throw boardMoveFeedbackFingerprint.patchException()
+        val boardMoveFeedbackImplementation = boardMoveFeedbackMethod.implementation
+            ?: throw IllegalStateException("Board MoveFeedback constructor has no DEX implementation")
+        val boardMoveFeedbackParameterRegisters = boardMoveFeedbackMethod.parameters.sumOf { parameter ->
+            if (parameter.type == "J" || parameter.type == "D") 2 else 1
+        }
+        val boardMoveFeedbackStartRegister = boardMoveFeedbackImplementation.registerCount
+            - boardMoveFeedbackParameterRegisters
+        require(boardMoveFeedbackStartRegister >= 0) {
+            "Invalid parameter register for board MoveFeedback constructor"
+        }
+        val boardMoveFeedbackHook = ImmutableMethodReference(
+            EXTENSION_CLASS,
+            "onBoardMoveFeedback",
+            listOf("Ljava/lang/Object;", "Ljava/lang/Object;"),
+            "V"
+        )
+        boardMoveFeedbackMethod.addInstruction(
+            0,
+            BuilderInstruction3rc(
+                Opcode.INVOKE_STATIC_RANGE,
+                boardMoveFeedbackStartRegister,
+                2,
+                boardMoveFeedbackHook
+            )
+        )
     }
 }

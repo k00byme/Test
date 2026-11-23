@@ -208,6 +208,23 @@ public final class ChessAssistantPatch {
         overlay.showNativeFeedback(value, moveIndex);
     }
 
+    /**
+     * Receives the native board MoveFeedback object. CORRECT/INCORRECT/RETRY are
+     * the immediate feedback states used by Chess.com's coach/training flow.
+     */
+    public static void onBoardMoveFeedback(Object move, Object feedbackType) {
+        if (feedbackType == null) return;
+        String value = feedbackType instanceof Enum
+                ? ((Enum<?>) feedbackType).name()
+                : String.valueOf(feedbackType);
+        value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
+        if ("NONE".equals(value) || "MOVE".equals(value) || value.isEmpty()) return;
+
+        AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
+        if (overlay == null || overlay.closed) return;
+        overlay.showBoardMoveFeedback(value);
+    }
+
     public static void install(Activity activity) {
         if (activity == null) return;
         String activityName = activity.getClass().getName();
@@ -398,6 +415,23 @@ public final class ChessAssistantPatch {
                 String label = "FEEDBACK DO LANCE · " + classification;
                 if (moveIndex > 0) label += " · #" + moveIndex;
                 feedbackPanel.setText(label);
+                feedbackPanel.setVisibility(View.VISIBLE);
+            });
+        }
+
+        private void showBoardMoveFeedback(String feedbackType) {
+            final String label;
+            switch (feedbackType) {
+                case "CORRECT": label = "JOGADA CORRETA"; break;
+                case "INCORRECT": label = "JOGADA INCORRETA"; break;
+                case "RETRY": label = "TENTE NOVAMENTE"; break;
+                case "CAPTURE": label = "CAPTURA"; break;
+                case "ANALYSIS": label = "ANÁLISE"; break;
+                default: label = feedbackType;
+            }
+            MAIN.post(() -> {
+                if (closed || !isAttachedToWindow()) return;
+                feedbackPanel.setText("FEEDBACK DO LANCE · " + label);
                 feedbackPanel.setVisibility(View.VISIBLE);
             });
         }
