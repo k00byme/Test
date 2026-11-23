@@ -126,13 +126,13 @@ val chessAssistantPatch = patch(
             ?: throw nativeFeedbackFingerprint.patchException()
         val nativeFeedbackImplementation = nativeFeedbackMethod.implementation
             ?: throw IllegalStateException("PlayerMoveFeedback constructor has no DEX implementation")
-        val nativeFeedbackParameterRegisters = nativeFeedbackMethod.parameters.sumOf { parameter ->
-            if (parameter.type == "J" || parameter.type == "D") 2 else 1
-        }
-        val nativeFeedbackStartRegister = nativeFeedbackImplementation.registerCount
-            - nativeFeedbackParameterRegisters
-        require(nativeFeedbackStartRegister >= 0) {
-            "Invalid parameter register for PlayerMoveFeedback constructor"
+        // This constructor has six one-word explicit parameters. DEX stores
+        // the receiver in the preceding register, so the invoke range begins at v2
+        // for the target Chess.com build (registerCount=8, ins_size=7).
+        val nativeFeedbackStartRegister = nativeFeedbackImplementation.registerCount - 6
+        require(nativeFeedbackStartRegister == 2
+            && nativeFeedbackStartRegister + 6 <= nativeFeedbackImplementation.registerCount) {
+            "Unexpected PlayerMoveFeedback register layout"
         }
         val nativeFeedbackHook = ImmutableMethodReference(
             EXTENSION_CLASS,
@@ -175,13 +175,12 @@ val chessAssistantPatch = patch(
             ?: throw boardMoveFeedbackFingerprint.patchException()
         val boardMoveFeedbackImplementation = boardMoveFeedbackMethod.implementation
             ?: throw IllegalStateException("Board MoveFeedback constructor has no DEX implementation")
-        val boardMoveFeedbackParameterRegisters = boardMoveFeedbackMethod.parameters.sumOf { parameter ->
-            if (parameter.type == "J" || parameter.type == "D") 2 else 1
-        }
-        val boardMoveFeedbackStartRegister = boardMoveFeedbackImplementation.registerCount
-            - boardMoveFeedbackParameterRegisters
-        require(boardMoveFeedbackStartRegister >= 0) {
-            "Invalid parameter register for board MoveFeedback constructor"
+        // This constructor has two one-word explicit parameters; its receiver
+        // occupies the preceding register. The target build uses v2-v3.
+        val boardMoveFeedbackStartRegister = boardMoveFeedbackImplementation.registerCount - 2
+        require(boardMoveFeedbackStartRegister == 2
+            && boardMoveFeedbackStartRegister + 2 <= boardMoveFeedbackImplementation.registerCount) {
+            "Unexpected board MoveFeedback register layout"
         }
         val boardMoveFeedbackHook = ImmutableMethodReference(
             EXTENSION_CLASS,
