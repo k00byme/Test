@@ -4,27 +4,24 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 
 ## Supported screens
 
-- **Online human games:** `RealGameActivity`. The evaluation panel and up to three visual move suggestions are available; automatic move execution is disabled.
+- **Online human games:** `RealGameActivity`. The evaluation panel and visual move suggestions are available; automatic move execution is disabled.
 - **Play vs Bots:** `BotGameActivityV2`. The evaluation panel, move suggestions, and optional AUTO control are available.
 - **Standalone analysis:** `StandaloneAnalysisActivityV2`.
 
 ## Move assistance
 
-- Stockfish evaluation panel.
-- Up to three analyzed MultiPV candidate moves: best, good/medium, and less favorable.
-- Green arrow for the final best line; yellow arrow for the second alternative.
-- Blue origin-square highlight and destination highlight matching each arrow.
-- The third line is shown in red. Native Chess.com move feedback is surfaced when the app's PlayerMoveFeedback pipeline emits a classification.
-- Board orientation handling and stale-overlay clearing.
-- Visual assistance remains enabled on supported online game screens and in post-game analysis. AUTO never sends moves in human-vs-human games.
+- Stockfish evaluation panel and board-orientation handling.
+- Up to three ordinary candidate arrows: green (best), yellow (second), and red (third).
+- A separate purple arrow for a distinct alternative returned by the deeper search. Tactical labels remain heuristics; the purple line is only available when the deep provider returns a distinct candidate.
+- Partial candidate snapshots are merged for the same FEN, so a delayed one-line response does not erase alternatives already received.
+- Stale overlays and old feedback markers are cleared when the active position changes.
+- AUTO never sends moves in human-vs-human games.
 
-The normal engine request uses depth 12, up to three variants, and a 100 ms thinking-time setting. Chess API REST, Chess API WebSocket, and Stockfish Online run concurrently; valid partial lines are combined instead of discarded, with a bounded collection window of approximately 6.5 seconds. The completed Chess API HTTPS response is the primary source, and its top-level `move` field remains authoritative for the green recommendation. The REST top-level move remains authoritative when present; WebSocket supplies additional MultiPV lines, while Stockfish Online is the independent emergency fallback. This avoids spending the full WebSocket timeout on the same host before reaching the independent fallback provider.
+The regular analysis requests up to five variations from Chess API over WebSocket and renders at most three. It also queries the Lichess Cloud Eval cache for up to five principal variations when that exact position is already cached. The Lichess endpoint is cache-only: an uncached position is a normal miss, not a reason to fabricate alternatives. Chess API HTTPS and Stockfish Online remain single-line/backup sources; neither is treated as proof that three alternatives exist. All valid candidate lines are deduplicated by their UCI first move and sorted using the side-to-move evaluation.
 
 ## Rare special assistance
 
-A separate deeper pass is requested for each valid board position, instead of being gated by shallow-score thresholds. It uses depth 18, up to four variants, and a 100 ms thinking-time setting. The HTTPS endpoint is tried first; WebSocket is used only if that request fails.
-
-The special indicator can identify a forced tactical sequence, a uniquely saving move, a decisive continuation, a hidden winning line, or a material sacrifice that retains sufficient engine compensation. Capture sacrifices, en passant, and promotions are included in the preliminary sacrifice scan. The indicator and purple board arrow appear only when the deeper engine result meets the corresponding confirmation criteria; checkmate is not required. This remains an engine-based heuristic, not a guarantee that every brilliant move will be found or that every label is infallible. The deeper search runs asynchronously so it does not block the regular green/yellow suggestions.
+A separate deeper pass uses depth 18 and up to four WebSocket variations. It checks forced tactical sequences, uniquely saving moves, decisive continuations, hidden winning lines, and material sacrifices with sufficient compensation. When no tactical condition matches, a distinct fourth line can still be surfaced as the purple alternative. The deep search runs asynchronously and does not block the ordinary green/yellow/red updates.
 
 ## Automatic play against bots
 
@@ -34,9 +31,18 @@ When enabled, it waits for the human player's turn and selects the engine's best
 
 The player's color is read from exposed activity/board metadata when available, with board orientation as a fallback. The control is hidden if no free area exists around the board where it can be displayed without covering squares.
 
+## Native Chess.com move feedback
+
+Two live-game signals are preserved:
+
+1. The board's native `MoveFeedback` constructor, which carries immediate states such as `CORRECT` and `INCORRECT`.
+2. The return value of `PositionAnalysis.c`, which is `PositionAnalysis$b`. Its native `AnalysisMoveClassification` enum is read from field `d`, and the post-move position from field `a`.
+
+The overlay uses Chess.com's original drawable resources for classifications such as `BRILLIANT`, `GREAT`, `BEST`, `EXCELLENT`, `GOOD`, `INACCURACY`, `MISTAKE`, `BLUNDER`, `MISS`, and `FORCED`. No feedback text panel is shown. The old Game Review, puzzle, lesson, and battle feedback hooks are not installed.
+
 ## Engine connectivity and privacy
 
-The normal move assistance tries `https://chess-api.com/v1` over HTTPS first and treats its top-level `move` field as authoritative for the green recommendation. On failure it immediately tries `https://stockfish.online/api/s/v2.php` on a separate host; that fallback provides one best move. The Chess API WebSocket performs TLS using the explicit hostname for SNI/certificate validation. A changed board position cancels the prior collection task so stale requests do not block the next move. Failed positions are retried automatically after 3, 6, 12, and then 30 seconds, while a newly detected position is analyzed immediately. The deeper special-analysis request also uses HTTPS before WebSocket. An internet connection is required; there is no on-device Stockfish engine. The current FEN is sent to the external analysis provider.
+Analysis sends the current FEN to external providers. Chess API uses HTTPS/WebSocket, Lichess is queried only for cached MultiPV positions, and Stockfish Online is a single-move fallback. The Lichess cache request is rate-limited locally, and an HTTP 404 means that the position is not cached. No on-device Stockfish engine is bundled. Internet access is required.
 
 ## Compatibility and build
 
@@ -46,9 +52,4 @@ The GitHub Actions workflow **Build Morphe Chess Assistant** runs `gradle buildA
 
 ## Verification status
 
-The patch source is compiled by GitHub Actions. Automatic touch delivery, control placement, the random delay, online overlay rendering, candidate timing, and bot-side color detection still require runtime confirmation on an Android device. Successful compilation alone does not prove runtime behavior.
-
-
-## Native Chess.com move feedback
-
-The patch hooks the native board `MoveFeedback` constructor (`FeedbackType`, including `CORRECT`, `INCORRECT`, and `RETRY`) and the `PositionAnalysis$b` (`PlayerMoveFeedback`) constructor, forwarding Chess.com's own feedback state and `AnalysisMoveClassification` to the overlay. This is separate from the Game Review callback, which remains installed for post-game classifications. The feedback overlay is attached to the bot, online RealGameActivity, and standalone analysis screens. Whether the app emits a native feedback event in each mode depends on its own runtime feature/state and must be confirmed on-device.
+GitHub Actions compilation, artifact integrity, and DEX content checks can validate the package structure. They cannot prove that every external provider returns multiple candidates for every FEN, nor replace an in-device check of feedback timing, overlay rendering, candidate colors, and board-side behavior.
