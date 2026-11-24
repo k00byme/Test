@@ -72,11 +72,16 @@ public final class ChessAssistantPatch {
     private static final String CHESS_API_PATH = "/v1";
     private static final String CHESS_API_URL = "https://chess-api.com/v1";
     private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
+    private static final String LICHESS_CLOUD_EVAL_URL = "https://lichess.org/api/cloud-eval";
+    private static final long CLOUD_REQUEST_INTERVAL_MS = 1100L;
+    private static volatile long lastCloudRequestElapsedRealtime;
+    private static volatile long cloudBlockedUntilElapsedRealtime;
     private static final int FAST_ENGINE_DEPTH = 12;
-    private static final int FAST_ENGINE_VARIANTS = 3;
-    private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 100;
+    private static final int FAST_ENGINE_VARIANTS = 5;
     private static final int ENGINE_DEPTH = 12;
+    private static final int ENGINE_REQUEST_VARIANTS = 5;
     private static final int ENGINE_VARIANTS = 3;
+    private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final long BOARD_POLL_INTERVAL_MS = 350L;
     private static final long ENGINE_TIMEOUT_MS = 15000L;
@@ -87,7 +92,7 @@ public final class ChessAssistantPatch {
     private static final int SPECIAL_ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final long SPECIAL_ENGINE_TIMEOUT_MS = 15000L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
-    private static final ExecutorService PROVIDER_EXECUTOR = Executors.newFixedThreadPool(3);
+    private static final ExecutorService PROVIDER_EXECUTOR = Executors.newFixedThreadPool(4);
     private static volatile WeakReference<AnalysisOverlay> ACTIVE_OVERLAY = new WeakReference<>(null);
 
     private interface CandidateUpdateListener {
@@ -221,6 +226,163 @@ public final class ChessAssistantPatch {
         } catch (Throwable ignored) {
             // Feedback collection must never be able to break a game or its analysis.
         }
+    }
+
+    /**
+     * Receives the live PositionAnalysis result returned by Chess.com's analysis flow.
+     * PositionAnalysis$b stores the native classification in field "d" and the
+     * position-after-move in field "a". Game Review and puzzle callbacks are not used.
+     */
+    public static void onNativeMoveFeedbackObject(Object feedbackObject) {
+        try {
+            if (feedbackObject == null) return;
+
+            Object classificationValue = readObjectField(feedbackObject, "d");
+            if (classificationValue == null) return;
+            String classification = classificationValue instanceof Enum
+                    ? ((Enum<?>) classificationValue).name()
+                    : String.valueOf(classificationValue);
+            classification = classification == null ? ""
+                    : classification.trim().toUpperCase(java.util.Locale.US);
+            if (classification.startsWith("MOVE_CLASSIFICATION_")) {
+                classification = classification.substring("MOVE_CLASSIFICATION_".length());
+            }
+            if ("GREAT_FIND".equals(classification)) classification = "GREAT";
+            if (classification.isEmpty() || "NONE".equals(classification)
+                    || "UNSPECIFIED".equals(classification)) return;
+
+            Object position = readObjectField(feedbackObject, "a");
+            if (position == null) return;
+            String destination = readLastMoveDestination(position);
+            if (destination.isEmpty()) return;
+
+            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
+            if (overlay == null || overlay.closed) return;
+
+            String positionFen = readPositionFen(position);
+            if (!isFen(positionFen)) positionFen = readFen(overlay.boardView);
+            if (!isFen(positionFen)) positionFen = overlay.activeFen;
+            overlay.showNativeFeedback(classification, destination, positionFen);
+        } catch (Throwable ignored) {
+            // Native feedback is observational and must never interrupt a game.
+        }
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) {
+        if (target == null || methodName == null || methodName.isEmpty()) return null;
+        try {
+            Method method = target.getClass().getMethod(methodName);
+            method.setAccessible(true);
+            return method.invoke(target);
+        } catch (Throwable ignored) {
+            // Some Chess.com model methods are not public on the concrete type.
+        }
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Method method = type.getDeclaredMethod(methodName);
+                method.setAccessible(true);
+                return method.invoke(target);
+            } catch (Throwable ignored) {
+                // Continue through the class hierarchy.
+            }
+        }
+        return null;
+    }
+
+    /** Read the exact FEN exposed by Chess.com's board-position model. */
+    private static String readPositionFen(Object position) {
+        if (position == null) return "";
+        String[] getters = {"o", "getFen", "toFen", "toFenString"};
+        for (String getter : getters) {
+            Object value = invokeNoArg(position, getter);
+            if (value instanceof String && isFen((String) value)) {
+                return ((String) value).trim();
+            }
+        }
+        Object value = readObjectField(position, "fen");
+        return value instanceof String && isFen((String) value) ? ((String) value).trim() : "";
+    }
+
+    /**
+     * The board-position history exposes its previous position as field "a".
+     * Comparing the two FEN boards yields the last move's destination, including
+     * captures, promotions, en-passant and castling.
+     */
+    private static String readLastMoveDestination(Object position) {
+        if (position == null) return "";
+        Object historyValue = invokeNoArg(position, "h");
+        if (historyValue instanceof List) {
+            List<?> history = (List<?>) historyValue;
+            if (!history.isEmpty()) {
+                Object last = history.get(history.size() - 1);
+                Object previousPosition = readObjectField(last, "a");
+                String destination = destinationFromFenDiff(
+                        readPositionFen(previousPosition), readPositionFen(position));
+                if (!destination.isEmpty()) return destination;
+
+                Object move = readObjectField(last, "b");
+                destination = readMoveDestination(move);
+                if (!destination.isEmpty()) return destination;
+
+                destination = readMoveDestination(last);
+                if (!destination.isEmpty()) return destination;
+            }
+        }
+        return readMoveDestination(position);
+    }
+
+    private static char[][] parseFenBoard(String fen) {
+        if (!isFen(fen)) return null;
+        String[] fields = fen.trim().split("\\s+");
+        String[] ranks = fields[0].split("/");
+        if (ranks.length != 8) return null;
+
+        char[][] board = new char[8][8];
+        for (int row = 0; row < 8; row++) {
+            int file = 0;
+            for (int i = 0; i < ranks[row].length(); i++) {
+                char token = ranks[row].charAt(i);
+                if (token >= '1' && token <= '8') {
+                    int count = token - '0';
+                    while (count-- > 0 && file < 8) board[row][file++] = '.';
+                } else if ("pnbrqkPNBRQK".indexOf(token) >= 0 && file < 8) {
+                    board[row][file++] = token;
+                } else {
+                    return null;
+                }
+            }
+            if (file != 8) return null;
+        }
+        return board;
+    }
+
+    private static String destinationFromFenDiff(String previousFen, String currentFen) {
+        char[][] before = parseFenBoard(previousFen);
+        char[][] after = parseFenBoard(currentFen);
+        if (before == null || after == null) return "";
+
+        String[] previousFields = previousFen.trim().split("\\s+");
+        boolean movedWhite = "w".equals(previousFields[1]);
+        String destination = "";
+        String kingDestination = "";
+
+        for (int row = 0; row < 8; row++) {
+            for (int file = 0; file < 8; file++) {
+                char oldPiece = before[row][file];
+                char newPiece = after[row][file];
+                if (oldPiece == newPiece || newPiece == '.' || newPiece == 0) continue;
+                if (Character.isUpperCase(newPiece) != movedWhite) continue;
+
+                String square = String.valueOf((char) ('a' + file))
+                        + String.valueOf(8 - row);
+                if (Character.toLowerCase(newPiece) == 'k') {
+                    kingDestination = square;
+                } else {
+                    destination = square;
+                }
+            }
+        }
+        return kingDestination.isEmpty() ? destination : kingDestination;
     }
 
     public static void install(Activity activity) {
