@@ -170,5 +170,55 @@ val chessAssistantPatch = patch(
                 "Z"
             )
         )
+        
+        // Current live move classifications are returned as PositionAnalysis$b.
+        // Instrument each object return (including null branches safely) and pass
+        // the native record to the extension without touching Game Review or puzzles.
+        val positionAnalysisHook = ImmutableMethodReference(
+            EXTENSION_CLASS,
+            "onNativeMoveFeedbackObject",
+            listOf("Ljava/lang/Object;"),
+            "V"
+        )
+        val positionAnalysisFingerprint = Fingerprint(
+            definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis;",
+            name = "c",
+            returnType = "Lcom/chess/analysis/enginelocal/PositionAnalysis$b;",
+            parameters = listOf(
+                "Lcom/chess/chessboard/variants/e;",
+                "Ljava/util/List;"
+            ),
+            isStatic = true
+        )
+        val positionAnalysisMethod = positionAnalysisFingerprint.methodOrNull
+            ?: throw positionAnalysisFingerprint.patchException()
+        val positionAnalysisImplementation = positionAnalysisMethod.implementation
+            ?: throw IllegalStateException("PositionAnalysis.c has no DEX implementation")
+
+        val positionAnalysisReturns = positionAnalysisImplementation.instructions.mapIndexedNotNull {
+                index, instruction ->
+            if (instruction.opcode == Opcode.RETURN_OBJECT) {
+                val returnInstruction = instruction as? OneRegisterInstruction
+                    ?: throw IllegalStateException("PositionAnalysis.c has an invalid object return")
+                index to returnInstruction.registerA
+            } else {
+                null
+            }
+        }
+        require(positionAnalysisReturns.isNotEmpty()) {
+            "PositionAnalysis.c has no object return instructions"
+        }
+
+        positionAnalysisReturns.sortedByDescending { it.first }.forEach { (index, register) ->
+            positionAnalysisMethod.addInstruction(
+                index,
+                BuilderInstruction3rc(
+                    Opcode.INVOKE_STATIC_RANGE,
+                    register,
+                    1,
+                    positionAnalysisHook
+                )
+            )
+        }
     }
 }
