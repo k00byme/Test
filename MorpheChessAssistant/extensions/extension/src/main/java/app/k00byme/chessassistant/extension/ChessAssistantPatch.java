@@ -66,16 +66,15 @@ import java.util.regex.Pattern;
  */
 public final class ChessAssistantPatch {
     private static final String TAG = "morphe.chess.assistant.analysis";
-    private static final String OFFICIAL_CLASSIFICATION_TAG = "morphe.chess.assistant.official.classification";
     private static final String BOARD_CLASS_V2 = "com.chess.chessboard.v2.ChessBoardView";
     private static final String BOARD_CLASS_V1 = "com.chess.chessboard.view.ChessBoardView";
     private static final String CHESS_API_HOST = "chess-api.com";
     private static final String CHESS_API_PATH = "/v1";
     private static final String CHESS_API_URL = "https://chess-api.com/v1";
     private static final String STOCKFISH_URL = "https://stockfish.online/api/s/v2.php";
-    private static final int FAST_ENGINE_DEPTH = 10;
-    private static final int FAST_ENGINE_VARIANTS = 2;
-    private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 80;
+    private static final int FAST_ENGINE_DEPTH = 12;
+    private static final int FAST_ENGINE_VARIANTS = 3;
+    private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final int ENGINE_DEPTH = 12;
     private static final int ENGINE_VARIANTS = 3;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
@@ -98,152 +97,6 @@ public final class ChessAssistantPatch {
     private ChessAssistantPatch() {}
 
     /** Called from BotGameActivityV2 or the standalone analysis screen. */
-
-    /**
-     * Receives the classification produced by Chess.com's own Game Review callback.
-     * The callback is GameReviewActivity$c; its synthetic outer-instance field points
-     * to the GameReviewActivity that owns the current review.
-     */
-    public static void onOfficialClassification(Object callback, Object classification, Object color) {
-        if (callback == null || classification == null || color == null) return;
-
-        String value = classification instanceof Enum
-                ? ((Enum<?>) classification).name()
-                : String.valueOf(classification);
-        value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
-        if ("GREAT_FIND".equals(value)) value = "GREAT";
-        if (!("BRILLIANT".equals(value) || "GREAT".equals(value)
-                || "BEST".equals(value) || "EXCELLENT".equals(value)
-                || "GOOD".equals(value) || "INACCURACY".equals(value)
-                || "MISTAKE".equals(value) || "BLUNDER".equals(value))) {
-            return;
-        }
-
-        String side = color instanceof Enum
-                ? ((Enum<?>) color).name()
-                : String.valueOf(color);
-        side = side == null ? "" : side.trim().toUpperCase(java.util.Locale.US);
-        if (!("WHITE".equals(side) || "BLACK".equals(side))) side = "PLAYER";
-
-        Activity activity = null;
-        for (Class<?> type = callback.getClass(); type != null && activity == null;
-             type = type.getSuperclass()) {
-            try {
-                Field outer = type.getDeclaredField("a");
-                outer.setAccessible(true);
-                Object candidate = outer.get(callback);
-                if (candidate instanceof Activity) activity = (Activity) candidate;
-            } catch (Throwable ignored) {
-                // Try the next class/field; obfuscated synthetic outer fields can vary.
-            }
-            if (activity == null) {
-                try {
-                    for (Field field : type.getDeclaredFields()) {
-                        if (Activity.class.isAssignableFrom(field.getType())) {
-                            field.setAccessible(true);
-                            Object candidate = field.get(callback);
-                            if (candidate instanceof Activity) {
-                                activity = (Activity) candidate;
-                                break;
-                            }
-                        }
-                    }
-                } catch (Throwable ignored) {
-                    // No Activity reference was exposed by this callback.
-                }
-            }
-        }
-        if (activity == null) return;
-
-        final Activity target = activity;
-        final String officialValue = value;
-        final String officialSide = side;
-        MAIN.post(() -> {
-            if (target.isFinishing()
-                    || (Build.VERSION.SDK_INT >= 17 && target.isDestroyed())) return;
-            View content = target.findViewById(android.R.id.content);
-            if (!(content instanceof ViewGroup)) return;
-            ViewGroup root = (ViewGroup) content;
-            TextView badge = (TextView) root.findViewWithTag(OFFICIAL_CLASSIFICATION_TAG);
-            if (badge == null) {
-                badge = new TextView(target);
-                badge.setTag(OFFICIAL_CLASSIFICATION_TAG);
-                badge.setTextColor(0xFFFFFFFF);
-                badge.setTextSize(13.0f);
-                badge.setTypeface(Typeface.create("sans-serif-bold", Typeface.BOLD));
-                badge.setGravity(Gravity.CENTER);
-                badge.setPadding(dp(target, 14), dp(target, 9), dp(target, 14), dp(target, 9));
-                badge.setElevation(dp(target, 8));
-                badge.setClickable(false);
-                badge.setFocusable(false);
-                GradientDrawable background = new GradientDrawable();
-                background.setColor(0xE820242B);
-                background.setCornerRadius(dp(target, 18));
-                background.setStroke(dp(target, 1), 0x887F8A99);
-                badge.setBackground(background);
-                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        Gravity.TOP | Gravity.CENTER_HORIZONTAL
-                );
-                params.topMargin = dp(target, 56);
-                root.addView(badge, params);
-            }
-            badge.setText("CHESS.COM  ·  " + officialValue + "  ·  " + officialSide);
-            badge.setContentDescription("Classificação oficial: " + officialValue
-                    + ", " + officialSide);
-            badge.setVisibility(View.VISIBLE);
-        });
-    }
-
-    /**
-     * Receives a fully constructed PlayerMoveFeedback returned by PositionAnalysis.c.
-     * The fields are read only after Chess.com has completed its data-class construction.
-     */
-    public static void onNativeMoveFeedbackObject(Object feedback) {
-        try {
-            if (feedback == null) return;
-            Object classification = readObjectField(feedback, "d");
-            Object indexValue = readObjectField(feedback, "e");
-            Object position = readObjectField(feedback, "a");
-            int moveIndex = indexValue instanceof Number
-                    ? ((Number) indexValue).intValue() : -1;
-            String destinationSquare = readLastMoveDestination(position);
-            String positionFen = readPositionFen(position);
-            dispatchNativeMoveFeedback(classification, moveIndex, destinationSquare, positionFen);
-        } catch (Throwable ignored) {
-            // Native feedback inspection must never affect Chess.com's analysis pipeline.
-        }
-    }
-
-    /**
-     * Receives the native PlayerMoveFeedback generated by Chess.com's PositionAnalysis.
-     * Unlike the Game Review callback, this is emitted by the live move-feedback pipeline.
-     */
-    public static void onNativeMoveFeedback(Object position, Object score, Object variations,
-                                            Object classification, int moveIndex, Object previousFeedback) {
-        dispatchNativeMoveFeedback(classification, moveIndex, "", "");
-    }
-
-    private static void dispatchNativeMoveFeedback(Object classification, int moveIndex,
-                                                   String destinationSquare, String positionFen) {
-        try {
-            if (classification == null) return;
-            String value = classification instanceof Enum
-                    ? ((Enum<?>) classification).name()
-                    : String.valueOf(classification);
-            value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
-            value = value.replace("MOVE_CLASSIFICATION_", "");
-            if ("GREAT_FIND".equals(value)) value = "GREAT";
-            if (value.isEmpty() || "NONE".equals(value) || "UNSPECIFIED".equals(value)) return;
-
-            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
-            if (overlay == null || overlay.closed) return;
-            overlay.showNativeFeedback(value, moveIndex, destinationSquare, positionFen);
-        } catch (Throwable ignored) {
-            // Feedback collection must never be able to break a game or its analysis.
-        }
-    }
 
     private static Field findInstanceField(Class<?> type, String name) {
         for (Class<?> current = type; current != null; current = current.getSuperclass()) {
@@ -268,34 +121,6 @@ public final class ChessAssistantPatch {
         }
     }
 
-    private static Object invokeNoArg(Object target, String name) {
-        if (target == null) return null;
-        try {
-            Method method = target.getClass().getMethod(name);
-            method.setAccessible(true);
-            return method.invoke(target);
-        } catch (Throwable ignored) {
-            for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
-                try {
-                    Method method = type.getDeclaredMethod(name);
-                    method.setAccessible(true);
-                    return method.invoke(target);
-                } catch (Throwable ignoredAgain) {
-                    // Try the next superclass.
-                }
-            }
-        }
-        return null;
-    }
-
-    private static String readPositionFen(Object position) {
-        Object value = invokeNoArg(position, "o");
-        if (value instanceof String && isFen((String) value)) {
-            return ((String) value).trim();
-        }
-        return "";
-    }
-
     private static String readMoveDestination(Object move) {
         if (move == null) return "";
         List<Object> squares = new ArrayList<>();
@@ -306,90 +131,6 @@ public final class ChessAssistantPatch {
         String lastSquare = "";
         while (matcher.find()) lastSquare = matcher.group();
         return lastSquare;
-    }
-
-    /**
-     * PositionAnalysis returns the actual board position. Its h() history list ends
-     * with the move that produced the feedback; history/f.b is Chess.com's RawMove.
-     */
-    private static String readLastMoveDestination(Object position) {
-        Object history = invokeNoArg(position, "h");
-        if (!(history instanceof List)) return "";
-        List<?> moves = (List<?>) history;
-        if (moves.isEmpty()) return "";
-        Object lastHistoryItem = moves.get(moves.size() - 1);
-
-        // history/f.a is the position before the move; feedback.a is the position after it.
-        String previousFen = readPositionFen(readObjectField(lastHistoryItem, "a"));
-        String currentFen = readPositionFen(position);
-        String destination = destinationFromFenDiff(previousFen, currentFen);
-        if (!destination.isEmpty()) return destination;
-
-        // Fallback for Chess.com move implementations that expose their endpoint squares.
-        Object rawMove = readObjectField(lastHistoryItem, "b");
-        if (rawMove == null) rawMove = lastHistoryItem;
-        List<Object> squares = new ArrayList<>();
-        List<Object> visited = new ArrayList<>();
-        collectBoardSquares(rawMove, squares, visited, 0);
-        if (squares.size() >= 2) return squareToAlgebraic(squares.get(squares.size() - 1));
-        if (squares.size() == 1) return squareToAlgebraic(squares.get(0));
-
-        Matcher matcher = Pattern.compile("[a-h][1-8]").matcher(String.valueOf(rawMove));
-        String lastSquare = "";
-        while (matcher.find()) lastSquare = matcher.group();
-        return lastSquare;
-    }
-
-    private static String destinationFromFenDiff(String previousFen, String currentFen) {
-        char[][] previous = parseFenBoard(previousFen);
-        char[][] current = parseFenBoard(currentFen);
-        if (previous == null || current == null) return "";
-
-        String kingDestination = "";
-        List<String> occupiedChanges = new ArrayList<>();
-        for (int row = 0; row < 8; row++) {
-            for (int column = 0; column < 8; column++) {
-                char before = previous[row][column];
-                char after = current[row][column];
-                if (before == after || after == '.') continue;
-
-                String square = String.valueOf((char) ('a' + column))
-                        + (char) ('8' - row);
-                occupiedChanges.add(square);
-                if (Character.toLowerCase(after) == 'k') kingDestination = square;
-            }
-        }
-
-        // Castling changes both the king and rook destinations; the played move ends at the king.
-        if (!kingDestination.isEmpty()) return kingDestination;
-        if (occupiedChanges.size() == 1) return occupiedChanges.get(0);
-        return occupiedChanges.isEmpty() ? "" : occupiedChanges.get(occupiedChanges.size() - 1);
-    }
-
-    private static char[][] parseFenBoard(String fen) {
-        if (!isFen(fen)) return null;
-        String[] fields = fen.trim().split("\\s+");
-        String[] ranks = fields[0].split("/");
-        if (ranks.length != 8) return null;
-
-        char[][] board = new char[8][8];
-        for (int row = 0; row < 8; row++) {
-            int column = 0;
-            for (int i = 0; i < ranks[row].length(); i++) {
-                char token = ranks[row].charAt(i);
-                if (token >= '1' && token <= '8') {
-                    int empty = token - '0';
-                    while (empty-- > 0 && column < 8) board[row][column++] = '.';
-                } else if (token >= 'a' && token <= 'z' || token >= 'A' && token <= 'Z') {
-                    if (column >= 8) return null;
-                    board[row][column++] = token;
-                } else {
-                    return null;
-                }
-            }
-            if (column != 8) return null;
-        }
-        return board;
     }
 
     private static void collectBoardSquares(Object value, List<Object> squares,
@@ -468,16 +209,15 @@ public final class ChessAssistantPatch {
             value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
             if ("NONE".equals(value) || "MOVE".equals(value) || value.isEmpty()) return;
 
+            if (!"CORRECT".equals(value) && !"INCORRECT".equals(value)) return;
+
             AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
             if (overlay == null || overlay.closed) return;
-            if ("CORRECT".equals(value) || "INCORRECT".equals(value)) {
-                String destination = readMoveDestination(move);
-                String positionFen = readFen(overlay.boardView);
-                if (!isFen(positionFen)) positionFen = overlay.activeFen;
-                overlay.showNativeFeedback(value, -1, destination, positionFen);
-            } else {
-                overlay.showBoardMoveFeedback(value);
-            }
+            String destination = readMoveDestination(move);
+            if (destination.isEmpty()) return;
+            String positionFen = readFen(overlay.boardView);
+            if (!isFen(positionFen)) positionFen = overlay.activeFen;
+            overlay.showNativeFeedback(value, destination, positionFen);
         } catch (Throwable ignored) {
             // Feedback collection must never be able to break a game or its analysis.
         }
@@ -517,7 +257,6 @@ public final class ChessAssistantPatch {
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final ExecutorService specialWorker = Executors.newSingleThreadExecutor();
         private final TextView panel;
-        private final TextView feedbackPanel;
         private final BoardDrawing drawing;
         private final boolean botGame;
         private final TextView autoButton;
@@ -595,30 +334,6 @@ public final class ChessAssistantPatch {
             panelParams.rightMargin = margin;
             addView(panel, panelParams);
 
-            feedbackPanel = new TextView(activity);
-            feedbackPanel.setTextColor(0xFFFFFFFF);
-            feedbackPanel.setTextSize(12.5f);
-            feedbackPanel.setTypeface(Typeface.create("sans-serif-bold", Typeface.BOLD));
-            feedbackPanel.setPadding(dp(activity, 12), dp(activity, 8), dp(activity, 12), dp(activity, 8));
-            feedbackPanel.setGravity(Gravity.CENTER);
-            feedbackPanel.setClickable(false);
-            feedbackPanel.setFocusable(false);
-            feedbackPanel.setElevation(dp(activity, 7));
-            GradientDrawable feedbackBackground = new GradientDrawable();
-            feedbackBackground.setColor(0xE82D4738);
-            feedbackBackground.setCornerRadius(dp(activity, 11));
-            feedbackBackground.setStroke(dp(activity, 1), 0x8878B99A);
-            feedbackPanel.setBackground(feedbackBackground);
-            FrameLayout.LayoutParams feedbackParams = new FrameLayout.LayoutParams(
-                    LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP | Gravity.CENTER_HORIZONTAL
-            );
-            feedbackParams.topMargin = dp(activity, 54);
-            feedbackParams.leftMargin = dp(activity, 12);
-            feedbackParams.rightMargin = dp(activity, 12);
-            addView(feedbackPanel, feedbackParams);
-            feedbackPanel.setVisibility(View.GONE);
-
             if (botGame) {
                 autoButton = new TextView(activity);
                 autoButton.setTextSize(12.5f);
@@ -668,33 +383,11 @@ public final class ChessAssistantPatch {
             super.onDetachedFromWindow();
         }
 
-        private void showNativeFeedback(String classification, int moveIndex,
-                                         String destinationSquare, String positionFen) {
+        private void showNativeFeedback(String classification, String destinationSquare, String positionFen) {
             MAIN.post(() -> {
                 if (closed || !isAttachedToWindow()) return;
                 nativeFeedbackFen = positionFen == null ? "" : positionFen;
                 drawing.setNativeFeedback(classification, destinationSquare);
-                String label = "FEEDBACK DO LANCE · " + classification;
-                if (moveIndex > 0) label += " · #" + moveIndex;
-                feedbackPanel.setText(label);
-                feedbackPanel.setVisibility(View.VISIBLE);
-            });
-        }
-
-        private void showBoardMoveFeedback(String feedbackType) {
-            final String label;
-            switch (feedbackType) {
-                case "CORRECT": label = "JOGADA CORRETA"; break;
-                case "INCORRECT": label = "JOGADA INCORRETA"; break;
-                case "RETRY": label = "TENTE NOVAMENTE"; break;
-                case "CAPTURE": label = "CAPTURA"; break;
-                case "ANALYSIS": label = "ANÁLISE"; break;
-                default: label = feedbackType;
-            }
-            MAIN.post(() -> {
-                if (closed || !isAttachedToWindow()) return;
-                feedbackPanel.setText("FEEDBACK DO LANCE · " + label);
-                feedbackPanel.setVisibility(View.VISIBLE);
             });
         }
 
@@ -1364,21 +1057,22 @@ public final class ChessAssistantPatch {
 
 
     private static EngineResult fetchSpecialAnalysis(String fen) {
-        // Prefer standard HTTPS; the custom WebSocket is only a fallback.
-        EngineResult result = fetchChessApiHttp(
+        // Deep MultiPV uses the progressive WebSocket endpoint first. REST normally
+        // returns only its best move, which is not enough for the purple comparison.
+        EngineResult result = fetchChessApi(
                 fen,
                 SPECIAL_ENGINE_DEPTH,
                 SPECIAL_ENGINE_VARIANTS,
-                SPECIAL_ENGINE_MAX_THINKING_TIME_MS
+                SPECIAL_ENGINE_MAX_THINKING_TIME_MS,
+                SPECIAL_ENGINE_TIMEOUT_MS,
+                true
         );
         if (result.error != null || result.candidates.length == 0) {
-            result = fetchChessApi(
+            result = fetchChessApiHttp(
                     fen,
                     SPECIAL_ENGINE_DEPTH,
                     SPECIAL_ENGINE_VARIANTS,
-                    SPECIAL_ENGINE_MAX_THINKING_TIME_MS,
-                    SPECIAL_ENGINE_TIMEOUT_MS,
-                    true
+                    SPECIAL_ENGINE_MAX_THINKING_TIME_MS
             );
         }
         if (result.error != null) return result;
