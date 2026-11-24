@@ -183,7 +183,7 @@ val chessAssistantPatch = patch(
         val positionAnalysisFingerprint = Fingerprint(
             definingClass = "Lcom/chess/analysis/enginelocal/PositionAnalysis;",
             name = "c",
-            returnType = "Lcom/chess/analysis/enginelocal/PositionAnalysis$b;",
+            returnType = "Lcom/chess/analysis/enginelocal/PositionAnalysis\$b;",
             parameters = listOf(
                 "Lcom/chess/chessboard/variants/e;",
                 "Ljava/util/List;"
