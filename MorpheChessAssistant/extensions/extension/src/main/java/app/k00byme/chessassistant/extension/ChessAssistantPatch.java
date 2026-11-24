@@ -706,16 +706,13 @@ public final class ChessAssistantPatch {
         private void applyEngineResult(String fen, EngineResult result, boolean completed) {
             if (result == null || result.error != null || !fen.equals(activeFen)) return;
 
-            // A provider can finish with fewer lines than another provider already
-            // streamed. Merge snapshots for this same FEN instead of letting a late
-            // single-line REST result erase yellow/red alternatives.
-            if (candidates != null && candidates.length > 0) {
-                EngineResult previous = new EngineResult(
-                        bestMove, evaluation, mate, null, candidates);
-                EngineResult combined = combineCandidateResults(result, previous, ENGINE_VARIANTS);
-                if (combined != null && combined.error == null && combined.candidates.length > 0) {
-                    result = combined;
-                }
+            // Always merge the same-FEN snapshots and cap the visible set to three.
+            // This also prevents a 5-line WebSocket packet from creating extra arrows.
+            EngineResult previous = new EngineResult(
+                    bestMove, evaluation, mate, null, candidates);
+            EngineResult combined = combineCandidateResults(result, previous, ENGINE_VARIANTS);
+            if (combined != null && combined.error == null && combined.candidates.length > 0) {
+                result = combined;
             }
 
             bestMove = result.bestMove;
@@ -1474,32 +1471,36 @@ public final class ChessAssistantPatch {
     private static EngineResult fetchAnalysis(String fen, CandidateUpdateListener listener) {
         Future<EngineResult> restFuture = null;
         Future<EngineResult> socketFuture = null;
+        Future<EngineResult> cloudFuture = null;
         Future<EngineResult> fallbackFuture = null;
         EngineResult rest = null;
         EngineResult socket = null;
+        EngineResult cloud = null;
         EngineResult fallback = null;
         String lastPublishedSignature = "";
         final long started = SystemClock.elapsedRealtime();
         final long deadline = started + 6500L;
 
         try {
-            // The fast WebSocket preview asks for only two lines at depth 10.
-            // REST and Stockfish run concurrently to fill the third line and refine scores.
+            // Ask Chess API for its full documented limit and query Lichess' cached
+            // MultiPV database in parallel; Stockfish Online remains a single-line fallback.
             restFuture = PROVIDER_EXECUTOR.submit(() ->
-                    fetchChessApiHttp(fen, ENGINE_DEPTH, ENGINE_VARIANTS, ENGINE_MAX_THINKING_TIME_MS));
+                    fetchChessApiHttp(fen, ENGINE_DEPTH, ENGINE_REQUEST_VARIANTS, ENGINE_MAX_THINKING_TIME_MS));
             socketFuture = PROVIDER_EXECUTOR.submit(() ->
                     fetchChessApi(fen, FAST_ENGINE_DEPTH, FAST_ENGINE_VARIANTS,
                             FAST_ENGINE_MAX_THINKING_TIME_MS, 4500L, false,
                             partial -> notifyCandidateUpdate(listener, partial)));
+            cloudFuture = PROVIDER_EXECUTOR.submit(() -> fetchLichessCloudEval(fen));
             fallbackFuture = PROVIDER_EXECUTOR.submit(() -> fetchStockfish(fen));
 
             while (!Thread.currentThread().isInterrupted()
                     && SystemClock.elapsedRealtime() < deadline) {
                 if (rest == null && restFuture.isDone()) rest = completedProvider(restFuture, "REST");
                 if (socket == null && socketFuture.isDone()) socket = completedProvider(socketFuture, "WebSocket");
+                if (cloud == null && cloudFuture.isDone()) cloud = completedProvider(cloudFuture, "Lichess Cloud Eval");
                 if (fallback == null && fallbackFuture.isDone()) fallback = completedProvider(fallbackFuture, "Stockfish Online");
 
-                EngineResult merged = mergeAvailableCandidates(fen, rest, socket, fallback);
+                EngineResult merged = mergeAvailableCandidates(fen, rest, socket, cloud, fallback);
                 if (merged != null && merged.error == null && merged.candidates.length > 0) {
                     String signature = candidateSignature(merged);
                     if (!signature.equals(lastPublishedSignature)) {
@@ -1519,7 +1520,7 @@ public final class ChessAssistantPatch {
                     return merged;
                 }
 
-                if (restFuture.isDone() && socketFuture.isDone() && fallbackFuture.isDone()) break;
+                if (restFuture.isDone() && socketFuture.isDone() && cloudFuture.isDone() && fallbackFuture.isDone()) break;
                 Thread.sleep(40L);
             }
 
@@ -1528,9 +1529,10 @@ public final class ChessAssistantPatch {
             }
             if (rest == null && restFuture.isDone()) rest = completedProvider(restFuture, "REST");
             if (socket == null && socketFuture.isDone()) socket = completedProvider(socketFuture, "WebSocket");
+            if (cloud == null && cloudFuture.isDone()) cloud = completedProvider(cloudFuture, "Lichess Cloud Eval");
             if (fallback == null && fallbackFuture.isDone()) fallback = completedProvider(fallbackFuture, "Stockfish Online");
 
-            EngineResult merged = mergeAvailableCandidates(fen, rest, socket, fallback);
+            EngineResult merged = mergeAvailableCandidates(fen, rest, socket, cloud, fallback);
             if (merged != null && merged.error == null && merged.candidates.length > 0) {
                 notifyCandidateUpdate(listener, merged);
                 return merged;
@@ -1538,9 +1540,10 @@ public final class ChessAssistantPatch {
 
             String restError = providerError(rest, restFuture, "REST");
             String socketError = providerError(socket, socketFuture, "WebSocket");
+            String cloudError = providerError(cloud, cloudFuture, "Lichess Cloud Eval");
             String fallbackError = providerError(fallback, fallbackFuture, "Stockfish Online");
             return EngineResult.error("REST: " + restError + " | WebSocket: " + socketError
-                    + " | Stockfish: " + fallbackError);
+                    + " | Lichess: " + cloudError + " | Stockfish: " + fallbackError);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return EngineResult.error("análise cancelada porque a posição mudou");
@@ -1551,6 +1554,7 @@ public final class ChessAssistantPatch {
         } finally {
             cancelProvider(restFuture);
             cancelProvider(socketFuture);
+            cancelProvider(cloudFuture);
             cancelProvider(fallbackFuture);
         }
     }
@@ -1596,13 +1600,17 @@ public final class ChessAssistantPatch {
     }
 
     private static EngineResult mergeAvailableCandidates(String fen, EngineResult rest,
-                                                         EngineResult socket, EngineResult fallback) {
+                                                         EngineResult socket, EngineResult cloud,
+                                                         EngineResult fallback) {
         EngineResult merged = null;
         if (rest != null && rest.error == null && rest.candidates != null && rest.candidates.length > 0) {
             merged = rest;
         }
         if (socket != null && socket.error == null && socket.candidates != null && socket.candidates.length > 0) {
             merged = merged == null ? socket : combineCandidateResults(merged, socket, ENGINE_VARIANTS);
+        }
+        if (cloud != null && cloud.error == null && cloud.candidates != null && cloud.candidates.length > 0) {
+            merged = merged == null ? cloud : combineCandidateResults(merged, cloud, ENGINE_VARIANTS);
         }
         if (fallback != null && fallback.error == null && !fallback.bestMove.isEmpty()) {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
@@ -1618,6 +1626,126 @@ public final class ChessAssistantPatch {
                     : combineCandidateResults(merged, fallbackCandidate, ENGINE_VARIANTS);
         }
         return merged;
+    }
+
+
+    /**
+     * Lichess Cloud Eval supplies up to five distinct cached principal variations.
+     * It is an additional source only: uncached positions fall through to Chess API.
+     */
+    private static EngineResult fetchLichessCloudEval(String fen) {
+        if (!isFen(fen)) return EngineResult.error("FEN inválido para Lichess Cloud Eval");
+
+        long now = SystemClock.elapsedRealtime();
+        synchronized (ChessAssistantPatch.class) {
+            if (now < cloudBlockedUntilElapsedRealtime) {
+                return EngineResult.error("Lichess Cloud Eval temporariamente limitado");
+            }
+            if (now - lastCloudRequestElapsedRealtime < CLOUD_REQUEST_INTERVAL_MS) {
+                return EngineResult.error("consulta Lichess adiada para respeitar o limite");
+            }
+            lastCloudRequestElapsedRealtime = now;
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            String query = "fen=" + URLEncoder.encode(fen, "UTF-8")
+                    + "&multiPv=5&variant=standard";
+            URL url = new URL(LICHESS_CLOUD_EVAL_URL + "?" + query);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(2000);
+            connection.setReadTimeout(2500);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/2.1");
+
+            int code = connection.getResponseCode();
+            if (code == 429) {
+                synchronized (ChessAssistantPatch.class) {
+                    cloudBlockedUntilElapsedRealtime = SystemClock.elapsedRealtime() + 60000L;
+                }
+                return EngineResult.error("Lichess Cloud Eval aplicou limite temporário");
+            }
+            if (code == 404) {
+                return EngineResult.error("posição ainda não disponível no cache da Lichess");
+            }
+
+            InputStream stream = code >= 200 && code < 300
+                    ? connection.getInputStream() : connection.getErrorStream();
+            if (stream == null) return EngineResult.error("Lichess Cloud Eval HTTP " + code);
+
+            StringBuilder body = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) body.append(line);
+            }
+            if (code < 200 || code >= 300) {
+                return EngineResult.error("Lichess Cloud Eval HTTP " + code);
+            }
+
+            JSONObject json = new JSONObject(body.toString());
+            JSONArray pvs = json.optJSONArray("pvs");
+            if (pvs == null || pvs.length() == 0) {
+                return EngineResult.error("cache da Lichess sem variantes");
+            }
+
+            boolean whiteToMove = fen.trim().split("\\s+")[1].equals("w");
+            int depth = json.optInt("depth", ENGINE_DEPTH);
+            if (depth <= 0) depth = ENGINE_DEPTH;
+            ArrayList<CandidateMove> found = new ArrayList<>();
+
+            for (int i = 0; i < pvs.length(); i++) {
+                JSONObject pv = pvs.optJSONObject(i);
+                if (pv == null) continue;
+                String lineMoves = pv.optString("moves", "").trim();
+                if (lineMoves.isEmpty()) continue;
+                String move = lineMoves.split("\\s+")[0].toLowerCase(java.util.Locale.US);
+                if (!isUciMove(move)) continue;
+
+                double evaluation = Double.NaN;
+                Object cpValue = pv.opt("cp");
+                try {
+                    if (cpValue instanceof Number) {
+                        evaluation = ((Number) cpValue).doubleValue() / 100.0;
+                    } else if (cpValue instanceof String) {
+                        evaluation = Double.parseDouble((String) cpValue) / 100.0;
+                    }
+                } catch (NumberFormatException ignored) {
+                    evaluation = Double.NaN;
+                }
+
+                int mate = 0;
+                Object mateValue = pv.opt("mate");
+                try {
+                    if (mateValue instanceof Number) {
+                        mate = ((Number) mateValue).intValue();
+                    } else if (mateValue instanceof String) {
+                        mate = Integer.parseInt((String) mateValue);
+                    }
+                } catch (NumberFormatException ignored) {
+                    mate = 0;
+                }
+
+                if (Double.isNaN(evaluation) && mate == 0) continue;
+                if (Double.isNaN(evaluation)) evaluation = 0.0;
+                addOrUpdateCandidate(found, new CandidateMove(
+                        move, evaluation, mate, depth, whiteToMove, "Lichess MultiPV"
+                ));
+            }
+
+            if (found.isEmpty()) {
+                return EngineResult.error("Lichess Cloud Eval não retornou jogadas UCI válidas");
+            }
+            return createCandidateSnapshot(found, ENGINE_VARIANTS);
+        } catch (Exception ex) {
+            String message = ex.getMessage();
+            if (message == null || message.trim().isEmpty()) message = "falha no Lichess Cloud Eval";
+            if (message.length() > 100) message = message.substring(0, 100);
+            return EngineResult.error(message);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     private static EngineResult combineCandidateResults(EngineResult preferred,
