@@ -1621,15 +1621,18 @@ public final class ChessAssistantPatch {
     private static EngineResult mergeAvailableCandidates(String fen, EngineResult rest,
                                                          EngineResult socket, EngineResult cloud,
                                                          EngineResult fallback) {
+        // The WebSocket is the authoritative live MultiPV stream. The HTTPS API
+        // frequently responds with only one move, so it must not claim first place
+        // over the variants carried by the socket. Lichess is cache-only support.
         EngineResult merged = null;
-        if (rest != null && rest.error == null && rest.candidates != null && rest.candidates.length > 0) {
-            merged = rest;
-        }
         if (socket != null && socket.error == null && socket.candidates != null && socket.candidates.length > 0) {
-            merged = merged == null ? socket : combineCandidateResults(merged, socket, ENGINE_VARIANTS);
+            merged = socket;
         }
         if (cloud != null && cloud.error == null && cloud.candidates != null && cloud.candidates.length > 0) {
             merged = merged == null ? cloud : combineCandidateResults(merged, cloud, ENGINE_VARIANTS);
+        }
+        if (rest != null && rest.error == null && rest.candidates != null && rest.candidates.length > 0) {
+            merged = merged == null ? rest : combineCandidateResults(merged, rest, ENGINE_VARIANTS);
         }
         if (fallback != null && fallback.error == null && !fallback.bestMove.isEmpty()) {
             boolean whiteToMove = fen.split("\\s+")[1].equals("w");
