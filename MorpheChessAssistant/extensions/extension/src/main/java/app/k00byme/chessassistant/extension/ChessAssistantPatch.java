@@ -543,6 +543,19 @@ public final class ChessAssistantPatch {
 
         private void applyEngineResult(String fen, EngineResult result, boolean completed) {
             if (result == null || result.error != null || !fen.equals(activeFen)) return;
+
+            // A provider can finish with fewer lines than another provider already
+            // streamed. Merge snapshots for this same FEN instead of letting a late
+            // single-line REST result erase yellow/red alternatives.
+            if (candidates != null && candidates.length > 0) {
+                EngineResult previous = new EngineResult(
+                        bestMove, evaluation, mate, null, candidates);
+                EngineResult combined = combineCandidateResults(result, previous, ENGINE_VARIANTS);
+                if (combined != null && combined.error == null && combined.candidates.length > 0) {
+                    result = combined;
+                }
+            }
+
             bestMove = result.bestMove;
             evaluation = result.evaluation;
             mate = result.mate;
