@@ -1345,6 +1345,25 @@ public final class ChessAssistantPatch {
             }
         }
 
+        // If the deep MultiPV search has a distinct fourth line, keep it as
+        // the purple alternative even when it is not a tactical "brilliant" move.
+        // Otherwise the purple arrow would disappear on ordinary positions.
+        if (normal != null && normal.length > 0) {
+            for (CandidateMove candidate : deep.candidates) {
+                if (candidate == null || !isUciMove(candidate.move)) continue;
+                boolean alreadyShown = false;
+                for (CandidateMove quick : normal) {
+                    if (quick != null && quick.move.equalsIgnoreCase(candidate.move)) {
+                        alreadyShown = true;
+                        break;
+                    }
+                }
+                if (!alreadyShown) {
+                    return new SpecialFinding(candidate, "ALTERNATIVA DE BUSCA PROFUNDA",
+                            "Linha distinta encontrada na análise aprofundada.");
+                }
+            }
+        }
         return null;
     }
 
@@ -2299,6 +2318,26 @@ public final class ChessAssistantPatch {
         String move = json.optString("move", "").trim();
         if (!isUciMove(move)) move = json.optString("lan", "").trim();
         if (!isUciMove(move)) move = json.optString("uci", "").trim();
+
+        // Some MultiPV providers encode each principal variation as a UCI
+        // sequence ("moves" / "pv") instead of a standalone "move" field.
+        if (!isUciMove(move)) {
+            Object lineValue = json.opt("moves");
+            if (!(lineValue instanceof String) || ((String) lineValue).trim().isEmpty()) {
+                lineValue = json.opt("pv");
+            }
+            if (lineValue instanceof String) {
+                String[] line = ((String) lineValue).trim().split("\\s+");
+                if (line.length > 0 && isUciMove(line[0])) move = line[0];
+            } else if (lineValue instanceof JSONArray) {
+                JSONArray line = (JSONArray) lineValue;
+                if (line.length() > 0) {
+                    String first = line.optString(0, "").trim();
+                    if (isUciMove(first)) move = first;
+                }
+            }
+        }
+
         if (!isUciMove(move)) {
             String bestMoveField = json.optString("bestmove", "").trim();
             if (isUciMove(bestMoveField)) {
@@ -2335,7 +2374,8 @@ public final class ChessAssistantPatch {
         }
 
         if (Double.isNaN(evaluation)) {
-            Object centipawnValue = json.opt("centipawns");
+            Object centipawnValue = json.has("centipawns")
+                    ? json.opt("centipawns") : json.opt("cp");
             try {
                 if (centipawnValue instanceof Number) {
                     evaluation = ((Number) centipawnValue).doubleValue() / 100.0;
