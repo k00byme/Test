@@ -399,13 +399,17 @@ final class LocalStockfishEngine {
                     }
                 }
             } catch (InterruptedException interrupted) {
+                // Clear the flag long enough to drain the cancelled UCI search. If its
+                // bestmove is left queued, it could be mistaken for the next FEN.
+                Thread.interrupted();
                 try {
                     send("stop");
                     drainUntilBestMove();
                 } catch (Throwable ignored) {
                     // Keep the original cancellation reason.
+                } finally {
+                    Thread.currentThread().interrupt();
                 }
-                Thread.currentThread().interrupt();
                 throw interrupted;
             }
 
