@@ -1340,6 +1340,9 @@ public final class ChessAssistantPatch {
             if (local != null && local.error == null && local.candidates.length > 0) {
                 return local;
             }
+            if (Thread.currentThread().isInterrupted()) {
+                return EngineResult.error("análise profunda cancelada");
+            }
         }
 
         // Remote fallback for unsupported ABIs or a native-engine failure.
@@ -1631,6 +1634,9 @@ public final class ChessAssistantPatch {
                     fen, ENGINE_DEPTH, ENGINE_VARIANTS, ANALYSIS_COLLECTION_TIMEOUT_MS, listener);
             if (local != null && local.error == null && local.candidates.length > 0) {
                 return local;
+            }
+            if (Thread.currentThread().isInterrupted()) {
+                return EngineResult.error("análise cancelada");
             }
         }
 
