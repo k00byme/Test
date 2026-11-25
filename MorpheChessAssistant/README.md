@@ -17,11 +17,11 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 - Stale overlays and old feedback markers are cleared when the active position changes.
 - AUTO never sends moves in human-vs-human games.
 
-The regular analysis requests up to five variations from Chess API over WebSocket and renders at most three. It also queries the Lichess Cloud Eval cache for up to five principal variations when that exact position is already cached. The Lichess endpoint is cache-only: an uncached position is a normal miss, not a reason to fabricate alternatives. Chess API HTTPS and Stockfish Online remain single-line/backup sources; neither is treated as proof that three alternatives exist. All valid candidate lines are deduplicated by their UCI first move and sorted using the side-to-move evaluation.
+The regular analysis asks Chess API's progressive WebSocket for exactly three variations and renders up to three. The WebSocket is the primary source: when it completes a three-line result, the patch does not launch duplicate REST or Stockfish Online requests. Lichess Cloud Eval is queried in parallel only as a cache source; only one Lichess request may be in flight, with a local request interval. If the live stream is incomplete, Chess API HTTPS and Stockfish Online are started as bounded fallback requests. The exact-FEN LRU cache keeps up to 48 completed three-line results, so revisiting an analyzed position can render immediately. Candidate lines are deduplicated by their UCI first move and sorted using the side-to-move evaluation.
 
 ## Rare special assistance
 
-A separate deeper pass uses depth 18 and up to four WebSocket variations. It checks forced tactical sequences, uniquely saving moves, decisive continuations, hidden winning lines, and material sacrifices with sufficient compensation. When no tactical condition matches, a distinct fourth line can still be surfaced as the purple alternative. The deep search runs asynchronously and does not block the ordinary green/yellow/red updates.
+A separate deeper pass uses depth 18 and up to four WebSocket variations, with a bounded timeout. It starts only after the regular analysis completes, so it does not compete with the first live arrows or classify a purple line using an incomplete one-move snapshot. A search for an old FEN is cancelled when the board changes, and its late callback is ignored. It checks forced tactical sequences, uniquely saving moves, decisive continuations, hidden winning lines, and material sacrifices with sufficient compensation. When no tactical condition matches, a distinct fourth line can still be surfaced as the purple alternative.
 
 ## Automatic play against bots
 
