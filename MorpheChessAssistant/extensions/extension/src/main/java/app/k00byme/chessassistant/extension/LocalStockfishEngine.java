@@ -164,7 +164,14 @@ final class LocalStockfishEngine {
 
         library.setReadable(true, false);
         library.setExecutable(true, false);
+        // Android 14+ restricts dynamic code loading from writable files. The
+        // library is copied atomically into app-private storage, then made
+        // read-only before System.load() so newer Android releases accept it.
+        if (!library.setReadOnly() || library.canWrite()) {
+            throw new IOException("não foi possível proteger a biblioteca nativa contra escrita");
+        }
         nnue.setReadable(true, false);
+        nnue.setReadOnly();
         loadedLibraryPath = library.getAbsolutePath();
 
         System.load(loadedLibraryPath);
