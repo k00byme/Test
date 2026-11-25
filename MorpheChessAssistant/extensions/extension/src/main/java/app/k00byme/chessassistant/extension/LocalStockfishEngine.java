@@ -3,6 +3,7 @@ package app.k00byme.chessassistant.extension;
 import android.content.Context;
 import android.content.res.AssetManager;
 import android.os.Build;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -191,23 +192,14 @@ final class LocalStockfishEngine {
     }
 
     private static File findAndCopyLibrary(Context context, File root) throws IOException {
-        String[] abis = Build.SUPPORTED_ABIS;
-        if (abis == null || abis.length == 0) {
-            abis = new String[]{"arm64-v8a", "armeabi-v7a"};
-        }
-
-        for (String abi : abis) {
-            if (!"arm64-v8a".equals(abi) && !"armeabi-v7a".equals(abi)) continue;
-            String asset = "stockfish/native/" + abi + "/libchesswow_stockfish.so";
-            File destination = new File(new File(root, abi), "libchesswow_stockfish.so");
-            try {
-                return copyAssetIfNeeded(
-                        context.getAssets(), asset, destination, MIN_LIBRARY_BYTES);
-            } catch (IOException missingForThisAbi) {
-                // Continue to the next ABI supported by this device.
-            }
-        }
-        return null;
+        // Build.SUPPORTED_ABIS describes the device, while the process can still be
+        // 32-bit on a 64-bit device. Loading an ARM64 library into a 32-bit process
+        // would fail, so select the ABI of this actual app process.
+        String processAbi = Process.is64Bit() ? "arm64-v8a" : "armeabi-v7a";
+        String asset = "stockfish/native/" + processAbi + "/libchesswow_stockfish.so";
+        File destination = new File(new File(root, processAbi), "libchesswow_stockfish.so");
+        return copyAssetIfNeeded(
+                context.getAssets(), asset, destination, MIN_LIBRARY_BYTES);
     }
 
     private static File copyAssetIfNeeded(AssetManager assets, String assetPath,
@@ -379,6 +371,7 @@ final class LocalStockfishEngine {
                 if (!complete) {
                     send("stop");
                     long stopDeadline = SystemClock.elapsedRealtime() + STOP_DRAIN_TIMEOUT_MS;
+                    boolean stopAcknowledged = false;
                     while (SystemClock.elapsedRealtime() < stopDeadline) {
                         String line = OUTPUT.poll(120L, TimeUnit.MILLISECONDS);
                         if (line == null) continue;
@@ -393,13 +386,13 @@ final class LocalStockfishEngine {
                             if (tokens.length > 1 && isUciMove(tokens[1])) {
                                 bestMove = tokens[1].toLowerCase();
                             }
-                            complete = true;
+                            stopAcknowledged = true;
                             break;
                         } else if ("__STOCKFISH_EOF__".equals(line)) {
                             break;
                         }
                     }
-                    if (!complete) {
+                    if (!stopAcknowledged) {
                         ready = false;
                         lastError = "Stockfish não confirmou o fim da busca após STOP";
                         throw new TimeoutException(lastError);
