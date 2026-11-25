@@ -1289,8 +1289,11 @@ public final class ChessAssistantPatch {
             if (result == null || result.error != null || result.candidates.length == 0) {
                 return EngineResult.error("Stockfish local não retornou variantes válidas");
             }
+            if (!analysis.complete) {
+                return EngineResult.error("Stockfish local atingiu o limite antes de concluir a busca");
+            }
 
-            if (analysis.complete && depth == ENGINE_DEPTH && variants == ENGINE_VARIANTS) {
+            if (depth == ENGINE_DEPTH && variants == ENGINE_VARIANTS) {
                 cacheAnalysis(fen, result);
             }
             if (listener != null) notifyCandidateUpdate(listener, result);
