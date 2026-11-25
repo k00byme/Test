@@ -3,6 +3,7 @@ package app.k00byme.chessassistant
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.resourceFile
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction3rc
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction35c
@@ -25,6 +26,46 @@ val chessAssistantPatch = patch(
     extendWith("extensions/extension.mpe")
 
     execute {
+        // Copy the Stockfish 19 runtime into the target APK as ordinary assets.
+        // The extension .mpe intentionally remains DEX-only; native code and the
+        // NNUE network are shipped by this parent .mpp patch.
+        fun copyBundledResource(bundlePath: String, apkPath: String) {
+            val loader = Class.forName(
+                "app.k00byme.chessassistant.ChessAssistantPatchKt"
+            ).classLoader
+            val input = loader.getResourceAsStream(bundlePath)
+                ?: throw IllegalStateException("Stockfish resource missing from patch bundle: $bundlePath")
+            val output = resourceFile(apkPath, false)
+            output.parentFile?.mkdirs()
+            input.use { source ->
+                output.outputStream().use { target -> source.copyTo(target) }
+            }
+            require(output.isFile && output.length() > 0L) {
+                "Could not add Stockfish resource to the APK: $apkPath"
+            }
+        }
+
+        copyBundledResource(
+            "native-stockfish/arm64-v8a/libchesswow_stockfish.so",
+            "assets/stockfish/native/arm64-v8a/libchesswow_stockfish.so"
+        )
+        copyBundledResource(
+            "native-stockfish/armeabi-v7a/libchesswow_stockfish.so",
+            "assets/stockfish/native/armeabi-v7a/libchesswow_stockfish.so"
+        )
+        copyBundledResource(
+            "native-stockfish/nn-1a298aa575a0.nnue",
+            "assets/stockfish/nn-1a298aa575a0.nnue"
+        )
+        copyBundledResource(
+            "native-stockfish/COPYING",
+            "assets/stockfish/COPYING"
+        )
+        copyBundledResource(
+            "native-stockfish/AUTHORS",
+            "assets/stockfish/AUTHORS"
+        )
+
         fun hookActivity(className: String) {
             val fingerprint = Fingerprint(
                 definingClass = className,
