@@ -1,5 +1,5 @@
 name: Build Morphe Chess Assistant
-run-name: Build Chess Assistant with bot AUTO mode
+run-name: Build Chess Assistant with local Stockfish 19
 
 on:
   push:
@@ -29,15 +29,100 @@ jobs:
         with:
           gradle-version: "9.9.1"
 
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install CMake and Android NDK
+        run: |
+          set -euo pipefail
+          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1"
+          sdkmanager --licenses
+          echo "$ANDROID_HOME/cmake/3.22.1/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned Stockfish 19 source and NNUE network
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/chesswow/stockfish.git "$RUNNER_TEMP/chesswow-stockfish"
+          git -C "$RUNNER_TEMP/chesswow-stockfish" checkout --detach 028e24b5d52bf652fba036084d9a7040d4020111
+          cd "$RUNNER_TEMP/chesswow-stockfish"
+          ./fetch-net.sh
+          echo "1a298aa575a085434d29027978dc36867fe9c5bcea9376654b7a8eba1e52dfc2  net/nn-1a298aa575a0.nnue" | sha256sum --check
+          echo "STOCKFISH_SOURCE_COMMIT=028e24b5d52bf652fba036084d9a7040d4020111" >> "$GITHUB_ENV"
+
+      - name: Build Stockfish 19 JNI libraries for Android
+        run: |
+          set -euo pipefail
+          STOCKFISH="$RUNNER_TEMP/chesswow-stockfish"
+          NDK="$ANDROID_HOME/ndk/28.2.13676358"
+          DEST="$GITHUB_WORKSPACE/MorpheChessAssistant/patches/src/main/resources/native-stockfish"
+          mkdir -p "$DEST"
+
+          for ABI in arm64-v8a armeabi-v7a; do
+            BUILD="$RUNNER_TEMP/stockfish-build-$ABI"
+            cmake -S "$STOCKFISH/android" -B "$BUILD" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$ABI" \
+              -DANDROID_PLATFORM=android-26 \
+              -DANDROID_STL=c++_static \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSTOCKFISH_DIR="$STOCKFISH/src"
+            cmake --build "$BUILD" --config Release --parallel 2
+
+            LIBRARY="$(find "$BUILD" -type f -name libchesswow_stockfish.so -print -quit)"
+            test -n "$LIBRARY"
+            mkdir -p "$DEST/$ABI"
+            cp "$LIBRARY" "$DEST/$ABI/libchesswow_stockfish.so"
+            file "$DEST/$ABI/libchesswow_stockfish.so"
+            sha256sum "$DEST/$ABI/libchesswow_stockfish.so"
+          done
+
+          cp "$STOCKFISH/net/nn-1a298aa575a0.nnue" "$DEST/nn-1a298aa575a0.nnue"
+          cp "$STOCKFISH/COPYING" "$DEST/COPYING"
+          cp "$STOCKFISH/AUTHORS" "$DEST/AUTHORS"
+          cat > "$DEST/STOCKFISH-SOURCE.txt" <<'EOF'
+          Stockfish 19 source corresponding to the included native libraries:
+          https://github.com/chesswow/stockfish/tree/028e24b5d52bf652fba036084d9a7040d4020111
+          Upstream Stockfish tag: sf_19
+          Upstream source commit: edb0d9db6731067ec50ce619ff372b463bc4dd5d
+          License: GNU General Public License version 3 or later (GPL-3.0-or-later).
+          The NNUE network is the unchanged Stockfish 19 network nn-1a298aa575a0.nnue.
+          EOF
+          echo "NNUE_SHA256=1a298aa575a085434d29027978dc36867fe9c5bcea9376654b7a8eba1e52dfc2" >> "$GITHUB_ENV"
+
+      - name: Verify native payload before packaging
+        run: |
+          set -euo pipefail
+          PAYLOAD="MorpheChessAssistant/patches/src/main/resources/native-stockfish"
+          test -s "$PAYLOAD/arm64-v8a/libchesswow_stockfish.so"
+          test -s "$PAYLOAD/armeabi-v7a/libchesswow_stockfish.so"
+          test -s "$PAYLOAD/nn-1a298aa575a0.nnue"
+          test -s "$PAYLOAD/COPYING"
+          test -s "$PAYLOAD/AUTHORS"
+          test "$(sha256sum "$PAYLOAD/nn-1a298aa575a0.nnue" | cut -d' ' -f1)" = "$NNUE_SHA256"
+          readelf -h "$PAYLOAD/arm64-v8a/libchesswow_stockfish.so" | grep -q "AArch64"
+          readelf -h "$PAYLOAD/armeabi-v7a/libchesswow_stockfish.so" | grep -q "ARM"
+
       - name: Build Morphe bundle
         working-directory: MorpheChessAssistant
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gradle buildAndroid --no-daemon
 
+      - name: Verify native resources are in the .mpp
+        run: |
+          set -euo pipefail
+          MPP="$(find MorpheChessAssistant/patches/build/libs -type f -name '*.mpp' -print -quit)"
+          test -n "$MPP"
+          unzip -l "$MPP" | grep -q 'native-stockfish/arm64-v8a/libchesswow_stockfish.so'
+          unzip -l "$MPP" | grep -q 'native-stockfish/armeabi-v7a/libchesswow_stockfish.so'
+          unzip -l "$MPP" | grep -q 'native-stockfish/nn-1a298aa575a0.nnue'
+          unzip -t "$MPP"
+          sha256sum "$MPP"
+
       - name: Upload .mpp artifact
         uses: actions/upload-artifact@v4
         with:
-          name: chess-assistant-morphe-mpp
+          name: chess-assistant-morphe-mpp-stockfish19
           path: MorpheChessAssistant/patches/build/libs/*.mpp
           if-no-files-found: error
+          compression-level: 0
