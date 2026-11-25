@@ -48,7 +48,7 @@ The local UCI engine uses **2 threads**, a **64 MB hash**, **3 MultiPV lines** f
 
 The existing Chess API, Lichess Cloud Eval and Stockfish Online paths remain as fallbacks when the local library, ABI or NNUE cannot be loaded, or when local analysis fails. In those cases the patch retains the previous bounded network-provider behavior. A first position can also use the remote fallback if local initialization has not completed yet.
 
-When the local engine is ready, regular and deep FEN analysis stays on-device and does not need to be sent to those providers. Initial setup requires roughly 90 MB of additional private storage for the NNUE network, in addition to the native libraries. Internet is still needed for fallback analysis and normal Chess.com functions.
+When the local engine is ready, regular and deep FEN analysis stays on-device and does not need to be sent to those providers. Initial setup requires roughly 100 MB of additional private storage for the NNUE network and native libraries. The network's SHA-256 is checked before it is loaded, and the extracted native library is made read-only before dynamic loading for Android 14+ compatibility. Internet is still needed for fallback analysis and normal Chess.com functions.
 
 Stockfish is licensed under GPL-3.0-or-later. The patch bundle includes its license and authors file. Corresponding source: [ChessWOW Stockfish 19 pinned source](https://github.com/chesswow/stockfish/tree/028e24b5d52bf652fba036084d9a7040d4020111), based on upstream Stockfish tag `sf_19`.
 
