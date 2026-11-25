@@ -65,6 +65,9 @@ final class LocalStockfishEngine {
 
     private static volatile boolean initializing;
     private static volatile boolean ready;
+    // Once a native session loses UCI synchronization, do not try to reuse it.
+    // The remote provider path remains available for the rest of this process.
+    private static volatile boolean disabled;
     private static volatile String lastError = "";
     private static volatile Thread readerThread;
     private static volatile String loadedLibraryPath = "";
@@ -108,9 +111,9 @@ final class LocalStockfishEngine {
     private LocalStockfishEngine() {}
 
     static void initializeAsync(Context context) {
-        if (context == null || ready) return;
+        if (context == null || ready || disabled) return;
         synchronized (INIT_LOCK) {
-            if (ready || initializing) return;
+            if (ready || initializing || disabled) return;
             initializing = true;
         }
 
@@ -123,6 +126,7 @@ final class LocalStockfishEngine {
                 Log.i(TAG, "Stockfish 19 local engine ready (" + loadedLibraryPath + ")");
             } catch (Throwable error) {
                 ready = false;
+                disabled = true;
                 lastError = safeMessage(error);
                 Log.w(TAG, "Local Stockfish unavailable; remote providers remain enabled: "
                         + lastError, error);
@@ -285,6 +289,7 @@ final class LocalStockfishEngine {
                 OUTPUT.offer("__STOCKFISH_EOF__");
                 lastError = safeMessage(error);
                 ready = false;
+                disabled = true;
             }
         }, "ChessAssistant-Stockfish-output");
         reader.setDaemon(true);
@@ -325,13 +330,13 @@ final class LocalStockfishEngine {
         if (fen == null || fen.trim().isEmpty()) throw new IllegalArgumentException("FEN vazia");
         if (depth < 1 || depth > 30) throw new IllegalArgumentException("profundidade inválida");
         if (multiPv < 1 || multiPv > 5) throw new IllegalArgumentException("MultiPV inválido");
-        if (!ready || !StockfishNative.nativeIsRunning()) {
+        if (disabled || !ready || !StockfishNative.nativeIsRunning()) {
             throw new IOException(lastError.isEmpty()
                     ? "Stockfish local ainda não está pronto" : lastError);
         }
 
         synchronized (ENGINE_LOCK) {
-            if (!ready || !StockfishNative.nativeIsRunning()) {
+            if (disabled || !ready || !StockfishNative.nativeIsRunning()) {
                 throw new IOException("Stockfish local não está em execução");
             }
             drainOutput();
@@ -407,6 +412,7 @@ final class LocalStockfishEngine {
                     }
                     if (!stopAcknowledged) {
                         ready = false;
+                        disabled = true;
                         lastError = "Stockfish não confirmou o fim da busca após STOP";
                         throw new TimeoutException(lastError);
                     }
@@ -424,6 +430,7 @@ final class LocalStockfishEngine {
                 } finally {
                     if (!stopped) {
                         ready = false;
+                        disabled = true;
                         lastError = "Stockfish não confirmou o cancelamento da busca";
                     }
                     Thread.currentThread().interrupt();
