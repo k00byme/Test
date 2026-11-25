@@ -228,6 +228,12 @@ final class LocalStockfishEngine {
         try (InputStream input = new BufferedInputStream(assets.open(assetPath, AssetManager.ACCESS_STREAMING));
              FileOutputStream output = new FileOutputStream(temporary);
              BufferedOutputStream bufferedOutput = new BufferedOutputStream(output)) {
+            // Android 14+ dynamic-code loading requires read-only files. Set this
+            // immediately after opening the descriptor, before writing any bytes,
+            // following the Android platform guidance for dynamically-loaded code.
+            if (!temporary.setReadOnly()) {
+                throw new IOException("não foi possível criar arquivo Stockfish somente leitura");
+            }
             byte[] buffer = new byte[64 * 1024];
             int count;
             while ((count = input.read(buffer)) != -1) {
