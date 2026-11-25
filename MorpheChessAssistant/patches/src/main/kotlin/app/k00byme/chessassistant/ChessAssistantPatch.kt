@@ -65,6 +65,10 @@ val chessAssistantPatch = patch(
             "native-stockfish/AUTHORS",
             "assets/stockfish/AUTHORS"
         )
+        copyBundledResource(
+            "native-stockfish/STOCKFISH-SOURCE.txt",
+            "assets/stockfish/STOCKFISH-SOURCE.txt"
+        )
 
         fun hookActivity(className: String) {
             val fingerprint = Fingerprint(
