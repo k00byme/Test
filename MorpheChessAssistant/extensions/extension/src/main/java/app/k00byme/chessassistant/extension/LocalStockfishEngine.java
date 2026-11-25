@@ -395,19 +395,31 @@ final class LocalStockfishEngine {
                             }
                             complete = true;
                             break;
+                        } else if ("__STOCKFISH_EOF__".equals(line)) {
+                            break;
                         }
+                    }
+                    if (!complete) {
+                        ready = false;
+                        lastError = "Stockfish não confirmou o fim da busca após STOP";
+                        throw new TimeoutException(lastError);
                     }
                 }
             } catch (InterruptedException interrupted) {
                 // Clear the flag long enough to drain the cancelled UCI search. If its
                 // bestmove is left queued, it could be mistaken for the next FEN.
                 Thread.interrupted();
+                boolean stopped = false;
                 try {
                     send("stop");
-                    drainUntilBestMove();
+                    stopped = drainUntilBestMove();
                 } catch (Throwable ignored) {
                     // Keep the original cancellation reason.
                 } finally {
+                    if (!stopped) {
+                        ready = false;
+                        lastError = "Stockfish não confirmou o cancelamento da busca";
+                    }
                     Thread.currentThread().interrupt();
                 }
                 throw interrupted;
@@ -422,12 +434,15 @@ final class LocalStockfishEngine {
         }
     }
 
-    private static void drainUntilBestMove() throws InterruptedException {
+    private static boolean drainUntilBestMove() throws InterruptedException {
         long deadline = SystemClock.elapsedRealtime() + STOP_DRAIN_TIMEOUT_MS;
         while (SystemClock.elapsedRealtime() < deadline) {
             String line = OUTPUT.poll(120L, TimeUnit.MILLISECONDS);
-            if (line != null && line.startsWith("bestmove ")) return;
+            if (line == null) continue;
+            if (line.startsWith("bestmove ")) return true;
+            if ("__STOCKFISH_EOF__".equals(line)) return false;
         }
+        return false;
     }
 
     private static Line parseInfo(String line, boolean whiteToMove, int maxLines) {
