@@ -105,6 +105,18 @@ jobs:
           readelf -h "$PAYLOAD/arm64-v8a/libchesswow_stockfish.so" | grep -q "AArch64"
           readelf -h "$PAYLOAD/armeabi-v7a/libchesswow_stockfish.so" | grep -q "ARM"
 
+          LLVM_NM="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          for ABI in arm64-v8a armeabi-v7a; do
+            LIBRARY="$PAYLOAD/$ABI/libchesswow_stockfish.so"
+            for SYMBOL in \
+              Java_app_chesswow_engine_StockfishNative_nativeStart \
+              Java_app_chesswow_engine_StockfishNative_nativeSend \
+              Java_app_chesswow_engine_StockfishNative_nativeReceive \
+              Java_app_chesswow_engine_StockfishNative_nativeIsRunning; do
+              "$LLVM_NM" -D --defined-only "$LIBRARY" | grep -q "$SYMBOL"
+            done
+          done
+
       - name: Build Morphe bundle
         working-directory: MorpheChessAssistant
         env:
