@@ -50,8 +50,10 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -76,10 +78,26 @@ public final class ChessAssistantPatch {
     private static final long CLOUD_REQUEST_INTERVAL_MS = 1100L;
     private static volatile long lastCloudRequestElapsedRealtime;
     private static volatile long cloudBlockedUntilElapsedRealtime;
+    private static volatile boolean cloudRequestInFlight;
+
+    // Keep a small LRU of finished positions. Revisited positions can be displayed
+    // immediately without creating another network request.
+    private static final Object ANALYSIS_CACHE_LOCK = new Object();
+    private static final int ANALYSIS_CACHE_LIMIT = 48;
+    private static final LinkedHashMap<String, EngineResult> ANALYSIS_CACHE =
+            new LinkedHashMap<String, EngineResult>(64, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, EngineResult> eldest) {
+                    return size() > ANALYSIS_CACHE_LIMIT;
+                }
+            };
+
     private static final int FAST_ENGINE_DEPTH = 12;
-    private static final int FAST_ENGINE_VARIANTS = 5;
+    // The UI displays three regular arrows, so do not ask the provider to calculate
+    // two additional variants that cannot be shown.
+    private static final int FAST_ENGINE_VARIANTS = 3;
     private static final int ENGINE_DEPTH = 12;
-    private static final int ENGINE_REQUEST_VARIANTS = 5;
+    private static final int ENGINE_REQUEST_VARIANTS = 3;
     private static final int ENGINE_VARIANTS = 3;
     private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
@@ -90,9 +108,13 @@ public final class ChessAssistantPatch {
     private static final int SPECIAL_ENGINE_DEPTH = 18;
     private static final int SPECIAL_ENGINE_VARIANTS = 4;
     private static final int SPECIAL_ENGINE_MAX_THINKING_TIME_MS = 100;
-    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 15000L;
+    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 7000L;
+    private static final long FAST_ENGINE_TIMEOUT_MS = 3500L;
+    private static final long ANALYSIS_COLLECTION_TIMEOUT_MS = 7500L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
-    private static final ExecutorService PROVIDER_EXECUTOR = Executors.newFixedThreadPool(4);
+    // A few cancelled socket reads may finish during their bounded timeout. Extra
+    // network workers prevent those stale reads from starving the next board position.
+    private static final ExecutorService PROVIDER_EXECUTOR = Executors.newFixedThreadPool(6);
     private static volatile WeakReference<AnalysisOverlay> ACTIVE_OVERLAY = new WeakReference<>(null);
 
     private interface CandidateUpdateListener {
@@ -417,7 +439,7 @@ public final class ChessAssistantPatch {
         private final WeakReference<Activity> activityRef;
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
-        private final ExecutorService specialWorker = Executors.newSingleThreadExecutor();
+        private final ExecutorService specialWorker = Executors.newFixedThreadPool(2);
         private final TextView panel;
         private final BoardDrawing drawing;
         private final boolean botGame;
@@ -449,6 +471,8 @@ public final class ChessAssistantPatch {
         private boolean autoMoveInProgress;
         private String lastAutoFen = "";
         private boolean specialRequestInFlight;
+        private Future<?> specialAnalysisTask;
+        private long specialAnalysisSequence;
         private String specialRequestedFen = "";
         private String analysisSummary = "";
         private String specialMessage = "";
@@ -560,6 +584,17 @@ public final class ChessAssistantPatch {
             if (analysisTask != null) {
                 analysisTask.cancel(true);
                 analysisTask = null;
+            }
+            cancelSpecialAnalysis();
+        }
+
+        private void cancelSpecialAnalysis() {
+            specialAnalysisSequence++;
+            specialRequestInFlight = false;
+            specialRequestedFen = "";
+            if (specialAnalysisTask != null) {
+                specialAnalysisTask.cancel(true);
+                specialAnalysisTask = null;
             }
         }
 
@@ -725,14 +760,18 @@ public final class ChessAssistantPatch {
                     : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
             String mode = candidates.length >= 3 ? "3 linhas"
                     : candidates.length + " linha(s) disponível(is)";
-            analysisSummary = "STOCKFISH 18  •  profundidade " + ENGINE_DEPTH
+            analysisSummary = "STOCKFISH  •  profundidade " + ENGINE_DEPTH
                     + "\nAvaliação: " + evalText
                     + "\n" + mode;
             setStatus(analysisSummary);
             drawing.setEngine(candidates, evaluation, mate, isBoardFlipped(boardView));
 
-            // Start the deep purple search as soon as the first useful line appears.
-            if (candidates.length > 0) requestSpecialAnalysis(fen, candidates.clone());
+            // Run the deeper search after the regular result is complete. Starting it
+            // from the first partial line duplicated work against the same API and
+            // could classify the purple line using an incomplete one-move snapshot.
+            if (completed && candidates.length > 0) {
+                requestSpecialAnalysis(fen, candidates.clone());
+            }
             // AUTO must use the completed candidate set, not a provisional preview.
             if (completed && autoEnabled) maybeAutoMove(fen);
         }
@@ -756,35 +795,33 @@ public final class ChessAssistantPatch {
 
             specialRequestedFen = fen;
             specialRequestInFlight = true;
+            final long requestId = ++specialAnalysisSequence;
             try {
-                specialWorker.execute(() -> {
+                specialAnalysisTask = specialWorker.submit(() -> {
                     EngineResult deep = fetchSpecialAnalysis(fen);
                     final SpecialFinding finding = deep.error == null
                             ? findSpecialFinding(fen, normal, deep) : null;
                     MAIN.post(() -> {
+                        if (requestId != specialAnalysisSequence) return;
                         specialRequestInFlight = false;
-                        if (closed || !isAttachedToWindow()) return;
-
-                        // Ignore stale deep results if the board has already advanced.
-                        if (!fen.equals(activeFen)) {
-                            if (isFen(activeFen) && candidates.length >= 1) {
-                                requestSpecialAnalysis(activeFen, candidates.clone());
-                            }
-                            return;
-                        }
+                        specialAnalysisTask = null;
+                        if (closed || !isAttachedToWindow() || !fen.equals(activeFen)) return;
 
                         specialMove = finding == null ? "" : finding.candidate.move;
                         specialMessage = finding == null ? "" : finding.title
-                                + "\n" + finding.detail;
+                                + "\\n" + finding.detail;
                         drawing.setSpecialMove(specialMove);
                         if (finding != null) {
-                            setStatus(analysisSummary + "\n\n✦ ASSISTÊNCIA ESPECIAL\n"
-                                    + specialMessage + "\nLance: " + formatMove(specialMove));
+                            setStatus(analysisSummary + "\\n\\n✦ ASSISTÊNCIA ESPECIAL\\n"
+                                    + specialMessage + "\\nLance: " + formatMove(specialMove));
                         }
                     });
                 });
             } catch (RuntimeException ex) {
-                specialRequestInFlight = false;
+                if (requestId == specialAnalysisSequence) {
+                    specialRequestInFlight = false;
+                    specialAnalysisTask = null;
+                }
             }
         }
 
@@ -1487,82 +1524,160 @@ public final class ChessAssistantPatch {
         return false;
     }
 
+    private static EngineResult getCachedAnalysis(String fen) {
+        synchronized (ANALYSIS_CACHE_LOCK) {
+            EngineResult cached = ANALYSIS_CACHE.get(fen);
+            if (cached == null || cached.candidates == null || cached.candidates.length == 0) return null;
+            return new EngineResult(cached.bestMove, cached.evaluation, cached.mate, null,
+                    cached.candidates.clone());
+        }
+    }
+
+    private static void cacheAnalysis(String fen, EngineResult result) {
+        if (fen == null || result == null || result.error != null
+                || result.candidates == null || result.candidates.length < ENGINE_VARIANTS) return;
+        synchronized (ANALYSIS_CACHE_LOCK) {
+            ANALYSIS_CACHE.put(fen, new EngineResult(result.bestMove, result.evaluation,
+                    result.mate, null, result.candidates.clone()));
+        }
+    }
+
     private static EngineResult fetchAnalysis(String fen, CandidateUpdateListener listener) {
-        Future<EngineResult> restFuture = null;
+        EngineResult cached = getCachedAnalysis(fen);
+        if (cached != null) {
+            notifyCandidateUpdate(listener, cached);
+            return cached;
+        }
+
         Future<EngineResult> socketFuture = null;
         Future<EngineResult> cloudFuture = null;
+        Future<EngineResult> restFuture = null;
         Future<EngineResult> fallbackFuture = null;
-        EngineResult rest = null;
         EngineResult socket = null;
         EngineResult cloud = null;
+        EngineResult rest = null;
         EngineResult fallback = null;
+        AtomicReference<EngineResult> socketLatest = new AtomicReference<>(null);
         String lastPublishedSignature = "";
         final long started = SystemClock.elapsedRealtime();
-        final long deadline = started + 6500L;
+        final long deadline = started + ANALYSIS_COLLECTION_TIMEOUT_MS;
+        boolean backupsStarted = false;
 
         try {
-            // Ask Chess API for its full documented limit and query Lichess' cached
-            // MultiPV database in parallel; Stockfish Online remains a single-line fallback.
-            restFuture = PROVIDER_EXECUTOR.submit(() ->
-                    fetchChessApiHttp(fen, ENGINE_DEPTH, ENGINE_REQUEST_VARIANTS, ENGINE_MAX_THINKING_TIME_MS));
+            // Primary path: one progressive WebSocket request plus one cache-only
+            // Lichess lookup. REST and Stockfish Online are only started if the
+            // WebSocket does not produce all three visible lines.
             socketFuture = PROVIDER_EXECUTOR.submit(() ->
                     fetchChessApi(fen, FAST_ENGINE_DEPTH, FAST_ENGINE_VARIANTS,
-                            FAST_ENGINE_MAX_THINKING_TIME_MS, 4500L, false,
-                            partial -> notifyCandidateUpdate(listener, partial)));
+                            FAST_ENGINE_MAX_THINKING_TIME_MS, FAST_ENGINE_TIMEOUT_MS, false,
+                            partial -> {
+                                socketLatest.set(partial);
+                                notifyCandidateUpdate(listener, partial);
+                            }));
             cloudFuture = PROVIDER_EXECUTOR.submit(() -> fetchLichessCloudEval(fen));
-            fallbackFuture = PROVIDER_EXECUTOR.submit(() -> fetchStockfish(fen));
 
             while (!Thread.currentThread().isInterrupted()
                     && SystemClock.elapsedRealtime() < deadline) {
-                if (rest == null && restFuture.isDone()) rest = completedProvider(restFuture, "REST");
-                if (socket == null && socketFuture.isDone()) socket = completedProvider(socketFuture, "WebSocket");
-                if (cloud == null && cloudFuture.isDone()) cloud = completedProvider(cloudFuture, "Lichess Cloud Eval");
-                if (fallback == null && fallbackFuture.isDone()) fallback = completedProvider(fallbackFuture, "Stockfish Online");
+                long elapsed = SystemClock.elapsedRealtime() - started;
 
-                EngineResult merged = mergeAvailableCandidates(fen, rest, socket, cloud, fallback);
+                if (socket == null && socketFuture.isDone()) {
+                    socket = completedProvider(socketFuture, "WebSocket");
+                }
+                if (cloud == null && cloudFuture.isDone()) {
+                    cloud = completedProvider(cloudFuture, "Lichess Cloud Eval");
+                }
+
+                EngineResult liveSocket = socket != null ? socket : socketLatest.get();
+
+                // Hedge only when the live stream is finished or has not supplied a
+                // complete three-line set after a short grace period. This prevents
+                // two simultaneous requests to Chess API during normal operation.
+                if (!backupsStarted && (socketFuture.isDone()
+                        || (elapsed >= 1600L
+                        && (liveSocket == null || liveSocket.candidates.length < ENGINE_VARIANTS)))) {
+                    EngineResult current = mergeAvailableCandidates(fen, null, liveSocket, cloud, null);
+                    if (current == null || current.candidates.length < ENGINE_VARIANTS) {
+                        restFuture = PROVIDER_EXECUTOR.submit(() ->
+                                fetchChessApiHttp(fen, ENGINE_DEPTH, ENGINE_REQUEST_VARIANTS,
+                                        ENGINE_MAX_THINKING_TIME_MS));
+                        fallbackFuture = PROVIDER_EXECUTOR.submit(() -> fetchStockfish(fen));
+                    }
+                    backupsStarted = true;
+                }
+
+                if (rest == null && restFuture != null && restFuture.isDone()) {
+                    rest = completedProvider(restFuture, "REST");
+                }
+                if (fallback == null && fallbackFuture != null && fallbackFuture.isDone()) {
+                    fallback = completedProvider(fallbackFuture, "Stockfish Online");
+                }
+
+                EngineResult merged = mergeAvailableCandidates(fen, rest, liveSocket, cloud, fallback);
                 if (merged != null && merged.error == null && merged.candidates.length > 0) {
                     String signature = candidateSignature(merged);
                     if (!signature.equals(lastPublishedSignature)) {
                         lastPublishedSignature = signature;
                         notifyCandidateUpdate(listener, merged);
                     }
+
+                    // A finished WebSocket response has a confirmed bestmove. If it
+                    // contains three lines, there is no reason to wait for backups.
+                    if (socket != null && merged.candidates.length >= ENGINE_VARIANTS) {
+                        cacheAnalysis(fen, merged);
+                        return merged;
+                    }
+
+                    // A complete cached MultiPV result can stand alone when the live
+                    // stream has not emitted anything yet.
+                    if (liveSocket == null && cloud != null && cloud.error == null
+                            && cloud.candidates.length >= ENGINE_VARIANTS
+                            && elapsed >= 1600L) {
+                        cacheAnalysis(fen, merged);
+                        return merged;
+                    }
+
+                    // When the live stream has finished, return its best available
+                    // alternatives after the backups have had a chance to contribute.
+                    if (socket != null && backupsStarted
+                            && (restFuture == null || rest != null)
+                            && (fallbackFuture == null || fallback != null)) {
+                        cacheAnalysis(fen, merged);
+                        return merged;
+                    }
                 }
 
-                if (rest != null && rest.error == null && rest.candidates.length >= ENGINE_VARIANTS) {
-                    notifyCandidateUpdate(listener, rest);
-                    return rest;
-                }
-
-                if (merged != null && merged.error == null
-                        && merged.candidates.length >= ENGINE_VARIANTS
-                        && (rest != null || SystemClock.elapsedRealtime() - started >= 1800L)) {
-                    return merged;
-                }
-
-                if (restFuture.isDone() && socketFuture.isDone() && cloudFuture.isDone() && fallbackFuture.isDone()) break;
-                Thread.sleep(40L);
+                boolean allDone = socketFuture.isDone() && cloudFuture.isDone()
+                        && (restFuture == null || restFuture.isDone())
+                        && (fallbackFuture == null || fallbackFuture.isDone());
+                if (allDone) break;
+                Thread.sleep(50L);
             }
 
             if (Thread.currentThread().isInterrupted()) {
-                throw new InterruptedException("position changed");
+                throw new InterruptedException("posição mudou");
             }
-            if (rest == null && restFuture.isDone()) rest = completedProvider(restFuture, "REST");
             if (socket == null && socketFuture.isDone()) socket = completedProvider(socketFuture, "WebSocket");
             if (cloud == null && cloudFuture.isDone()) cloud = completedProvider(cloudFuture, "Lichess Cloud Eval");
-            if (fallback == null && fallbackFuture.isDone()) fallback = completedProvider(fallbackFuture, "Stockfish Online");
+            if (rest == null && restFuture != null && restFuture.isDone()) rest = completedProvider(restFuture, "REST");
+            if (fallback == null && fallbackFuture != null && fallbackFuture.isDone()) {
+                fallback = completedProvider(fallbackFuture, "Stockfish Online");
+            }
 
-            EngineResult merged = mergeAvailableCandidates(fen, rest, socket, cloud, fallback);
+            EngineResult liveSocket = socket != null ? socket : socketLatest.get();
+            EngineResult merged = mergeAvailableCandidates(fen, rest, liveSocket, cloud, fallback);
             if (merged != null && merged.error == null && merged.candidates.length > 0) {
                 notifyCandidateUpdate(listener, merged);
+                cacheAnalysis(fen, merged);
                 return merged;
             }
 
-            String restError = providerError(rest, restFuture, "REST");
             String socketError = providerError(socket, socketFuture, "WebSocket");
             String cloudError = providerError(cloud, cloudFuture, "Lichess Cloud Eval");
-            String fallbackError = providerError(fallback, fallbackFuture, "Stockfish Online");
-            return EngineResult.error("REST: " + restError + " | WebSocket: " + socketError
-                    + " | Lichess: " + cloudError + " | Stockfish: " + fallbackError);
+            String restError = restFuture == null ? "não necessário" : providerError(rest, restFuture, "REST");
+            String fallbackError = fallbackFuture == null
+                    ? "não necessário" : providerError(fallback, fallbackFuture, "Stockfish Online");
+            return EngineResult.error("WebSocket: " + socketError + " | Lichess: " + cloudError
+                    + " | REST: " + restError + " | Stockfish Online: " + fallbackError);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return EngineResult.error("análise cancelada porque a posição mudou");
@@ -1571,9 +1686,9 @@ public final class ChessAssistantPatch {
             if (message == null || message.trim().isEmpty()) message = "falha ao iniciar os provedores";
             return EngineResult.error(message);
         } finally {
-            cancelProvider(restFuture);
             cancelProvider(socketFuture);
             cancelProvider(cloudFuture);
+            cancelProvider(restFuture);
             cancelProvider(fallbackFuture);
         }
     }
@@ -1663,9 +1778,13 @@ public final class ChessAssistantPatch {
             if (now < cloudBlockedUntilElapsedRealtime) {
                 return EngineResult.error("Lichess Cloud Eval temporariamente limitado");
             }
+            if (cloudRequestInFlight) {
+                return EngineResult.error("já existe uma consulta Lichess em andamento");
+            }
             if (now - lastCloudRequestElapsedRealtime < CLOUD_REQUEST_INTERVAL_MS) {
                 return EngineResult.error("consulta Lichess adiada para respeitar o limite");
             }
+            cloudRequestInFlight = true;
             lastCloudRequestElapsedRealtime = now;
         }
 
@@ -1676,8 +1795,8 @@ public final class ChessAssistantPatch {
             URL url = new URL(LICHESS_CLOUD_EVAL_URL + "?" + query);
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(2000);
-            connection.setReadTimeout(2500);
+            connection.setConnectTimeout(1500);
+            connection.setReadTimeout(1800);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/2.1");
 
@@ -1766,6 +1885,9 @@ public final class ChessAssistantPatch {
             if (message.length() > 100) message = message.substring(0, 100);
             return EngineResult.error(message);
         } finally {
+            synchronized (ChessAssistantPatch.class) {
+                cloudRequestInFlight = false;
+            }
             if (connection != null) connection.disconnect();
         }
     }
@@ -1826,8 +1948,8 @@ public final class ChessAssistantPatch {
             connection = (HttpURLConnection) new URL(CHESS_API_URL).openConnection();
             connection.setRequestMethod("POST");
             connection.setDoOutput(true);
-            connection.setConnectTimeout(3500);
-            connection.setReadTimeout(5000);
+            connection.setConnectTimeout(2200);
+            connection.setReadTimeout(2800);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/2.0");
@@ -1954,13 +2076,13 @@ public final class ChessAssistantPatch {
         try {
             transport = new Socket();
             transport.setTcpNoDelay(true);
-            transport.connect(new InetSocketAddress(CHESS_API_HOST, 443), 2500);
+            transport.connect(new InetSocketAddress(CHESS_API_HOST, 443), 1800);
             SSLSocketFactory sslFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
             socket = (SSLSocket) sslFactory.createSocket(transport, CHESS_API_HOST, 443, true);
             socket.setUseClientMode(true);
-            socket.setSoTimeout(2500);
+            socket.setSoTimeout(1800);
             socket.startHandshake();
-            socket.setSoTimeout((int) Math.min(Math.max(timeoutMs, 1000L), 6000L));
+            socket.setSoTimeout((int) Math.min(Math.max(timeoutMs, 1000L), 4000L));
 
             BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
@@ -2412,8 +2534,8 @@ public final class ChessAssistantPatch {
             URL url = new URL(STOCKFISH_URL + "?" + query);
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(3500);
-            connection.setReadTimeout(5000);
+            connection.setConnectTimeout(2200);
+            connection.setReadTimeout(2800);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "ChessAssistant-Morphe/2.0");
 
