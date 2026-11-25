@@ -415,6 +415,10 @@ public final class ChessAssistantPatch {
                 || "com.chess.realchess.ui.game.RealGameActivity".equals(activityName);
         if (!supported) return;
 
+        // Prepare the local Stockfish 19 engine away from the UI thread. If native
+        // loading or NNUE extraction fails, the existing remote provider path remains.
+        LocalStockfishEngine.initializeAsync(activity.getApplicationContext());
+
         // onCreate is hooked before the app creates its content view, so defer installation.
         MAIN.postDelayed(() -> {
             if (activity.isFinishing() || (Build.VERSION.SDK_INT >= 17 && activity.isDestroyed())) {
@@ -1265,9 +1269,80 @@ public final class ChessAssistantPatch {
     }
 
 
+
+    private static EngineResult fetchLocalStockfish(String fen, int depth, int variants,
+                                                    long timeoutMs,
+                                                    CandidateUpdateListener listener) {
+        try {
+            final boolean whiteToMove = fen.trim().split("\\s+")[1].equals("w");
+            LocalStockfishEngine.Analysis analysis = LocalStockfishEngine.analyze(
+                    fen, depth, variants, timeoutMs,
+                    partial -> {
+                        EngineResult snapshot = fromLocalStockfish(fen, partial, whiteToMove, variants);
+                        if (snapshot != null && snapshot.error == null
+                                && snapshot.candidates.length > 0 && listener != null) {
+                            notifyCandidateUpdate(listener, snapshot);
+                        }
+                    });
+
+            EngineResult result = fromLocalStockfish(fen, analysis, whiteToMove, variants);
+            if (result == null || result.error != null || result.candidates.length == 0) {
+                return EngineResult.error("Stockfish local não retornou variantes válidas");
+            }
+
+            if (analysis.complete && depth == ENGINE_DEPTH && variants == ENGINE_VARIANTS) {
+                cacheAnalysis(fen, result);
+            }
+            if (listener != null) notifyCandidateUpdate(listener, result);
+            return result;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return EngineResult.error("análise local cancelada");
+        } catch (Throwable error) {
+            String message = error.getMessage();
+            if (message == null || message.trim().isEmpty()) {
+                message = error.getClass().getSimpleName();
+            }
+            if (message.length() > 90) message = message.substring(0, 90);
+            return EngineResult.error("Stockfish local: " + message);
+        }
+    }
+
+    private static EngineResult fromLocalStockfish(String fen,
+                                                   LocalStockfishEngine.Analysis analysis,
+                                                   boolean whiteToMove, int variants) {
+        if (analysis == null || analysis.lines == null || analysis.lines.isEmpty()) {
+            return EngineResult.error("Stockfish local sem linhas");
+        }
+        ArrayList<CandidateMove> moves = new ArrayList<>();
+        for (LocalStockfishEngine.Line line : analysis.lines) {
+            if (line == null || !isUciMove(line.move)) continue;
+            moves.add(new CandidateMove(line.move, line.evaluationWhite, line.mateWhite,
+                    line.depth, whiteToMove, ""));
+        }
+        if (moves.isEmpty()) return EngineResult.error("Stockfish local sem jogadas válidas");
+
+        CandidateMove best = moves.get(0);
+        String bestMove = analysis.bestMove == null || analysis.bestMove.isEmpty()
+                ? best.move : analysis.bestMove;
+        EngineResult raw = new EngineResult(bestMove, best.evaluation, best.mate, null,
+                moves.toArray(new CandidateMove[0]));
+        return combineCandidateResults(raw, null, Math.max(1, variants));
+    }
+
     private static EngineResult fetchSpecialAnalysis(String fen) {
-        // Deep MultiPV uses the progressive WebSocket endpoint first. REST normally
-        // returns only its best move, which is not enough for the purple comparison.
+        // Reuse the in-process engine for the deeper purple pass; this is serialized
+        // behind the regular search and does not create another network dependency.
+        if (LocalStockfishEngine.isReady()) {
+            EngineResult local = fetchLocalStockfish(
+                    fen, SPECIAL_ENGINE_DEPTH, SPECIAL_ENGINE_VARIANTS,
+                    SPECIAL_ENGINE_TIMEOUT_MS, null);
+            if (local != null && local.error == null && local.candidates.length > 0) {
+                return local;
+            }
+        }
+
+        // Remote fallback for unsupported ABIs or a native-engine failure.
         EngineResult result = fetchChessApi(
                 fen,
                 SPECIAL_ENGINE_DEPTH,
@@ -1547,6 +1622,16 @@ public final class ChessAssistantPatch {
         if (cached != null) {
             notifyCandidateUpdate(listener, cached);
             return cached;
+        }
+
+        // Local Stockfish is authoritative when available. Remote providers are
+        // retained as a fallback for devices/ABIs where the native engine cannot load.
+        if (LocalStockfishEngine.isReady()) {
+            EngineResult local = fetchLocalStockfish(
+                    fen, ENGINE_DEPTH, ENGINE_VARIANTS, ANALYSIS_COLLECTION_TIMEOUT_MS, listener);
+            if (local != null && local.error == null && local.candidates.length > 0) {
+                return local;
+            }
         }
 
         Future<EngineResult> socketFuture = null;
