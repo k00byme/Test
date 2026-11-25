@@ -97,6 +97,10 @@ public final class ChessAssistantPatch {
     // two additional variants that cannot be shown.
     private static final int FAST_ENGINE_VARIANTS = 3;
     private static final int ENGINE_DEPTH = 12;
+    // Local Stockfish receives a high depth ceiling and stops by its time budget.
+    private static final int LOCAL_ENGINE_DEPTH = 30;
+    private static final int LOCAL_SPECIAL_ENGINE_DEPTH = 30;
+    private static final int LOCAL_SPECIAL_ENGINE_VARIANTS = 1;
     private static final int ENGINE_REQUEST_VARIANTS = 3;
     private static final int ENGINE_VARIANTS = 3;
     private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 100;
@@ -108,9 +112,9 @@ public final class ChessAssistantPatch {
     private static final int SPECIAL_ENGINE_DEPTH = 18;
     private static final int SPECIAL_ENGINE_VARIANTS = 4;
     private static final int SPECIAL_ENGINE_MAX_THINKING_TIME_MS = 100;
-    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 7000L;
+    private static final long SPECIAL_ENGINE_TIMEOUT_MS = 8500L;
     private static final long FAST_ENGINE_TIMEOUT_MS = 3500L;
-    private static final long ANALYSIS_COLLECTION_TIMEOUT_MS = 7500L;
+    private static final long ANALYSIS_COLLECTION_TIMEOUT_MS = 9000L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     // A few cancelled socket reads may finish during their bounded timeout. Extra
     // network workers prevent those stale reads from starving the next board position.
@@ -764,7 +768,8 @@ public final class ChessAssistantPatch {
                     : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
             String mode = candidates.length >= 3 ? "3 linhas"
                     : candidates.length + " linha(s) disponível(is)";
-            analysisSummary = "STOCKFISH  •  profundidade " + ENGINE_DEPTH
+            int actualDepth = candidates.length > 0 ? candidates[0].depth : LOCAL_ENGINE_DEPTH;
+            analysisSummary = "STOCKFISH 19  •  profundidade " + actualDepth
                     + "\nAvaliação: " + evalText
                     + "\n" + mode;
             setStatus(analysisSummary);
@@ -1293,7 +1298,7 @@ public final class ChessAssistantPatch {
                 return EngineResult.error("Stockfish local atingiu o limite antes de concluir a busca");
             }
 
-            if (depth == ENGINE_DEPTH && variants == ENGINE_VARIANTS) {
+            if (depth == LOCAL_ENGINE_DEPTH && variants == ENGINE_VARIANTS) {
                 cacheAnalysis(fen, result);
             }
             if (listener != null) notifyCandidateUpdate(listener, result);
@@ -1338,7 +1343,7 @@ public final class ChessAssistantPatch {
         // behind the regular search and does not create another network dependency.
         if (LocalStockfishEngine.isReady()) {
             EngineResult local = fetchLocalStockfish(
-                    fen, SPECIAL_ENGINE_DEPTH, SPECIAL_ENGINE_VARIANTS,
+                    fen, LOCAL_SPECIAL_ENGINE_DEPTH, LOCAL_SPECIAL_ENGINE_VARIANTS,
                     SPECIAL_ENGINE_TIMEOUT_MS, null);
             if (local != null && local.error == null && local.candidates.length > 0) {
                 return local;
@@ -1634,7 +1639,7 @@ public final class ChessAssistantPatch {
         // retained as a fallback for devices/ABIs where the native engine cannot load.
         if (LocalStockfishEngine.isReady()) {
             EngineResult local = fetchLocalStockfish(
-                    fen, ENGINE_DEPTH, ENGINE_VARIANTS, ANALYSIS_COLLECTION_TIMEOUT_MS, listener);
+                    fen, LOCAL_ENGINE_DEPTH, ENGINE_VARIANTS, ANALYSIS_COLLECTION_TIMEOUT_MS, listener);
             if (local != null && local.error == null && local.candidates.length > 0) {
                 return local;
             }
