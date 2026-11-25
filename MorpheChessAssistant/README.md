@@ -40,9 +40,17 @@ Two live-game signals are preserved:
 
 The overlay uses Chess.com's original drawable resources for classifications such as `BRILLIANT`, `GREAT`, `BEST`, `EXCELLENT`, `GOOD`, `INACCURACY`, `MISTAKE`, `BLUNDER`, `MISS`, and `FORCED`. No feedback text panel is shown. The old Game Review, puzzle, lesson, and battle feedback hooks are not installed.
 
-## Engine connectivity and privacy
+## Local Stockfish 19 engine
 
-Analysis sends the current FEN to external providers. Chess API uses HTTPS/WebSocket, Lichess is queried only for cached MultiPV positions, and Stockfish Online is a single-move fallback. The Lichess cache request is rate-limited locally, and an HTTP 404 means that the position is not cached. No on-device Stockfish engine is bundled. Internet access is required.
+The patch bundles Stockfish 19 as an in-process native engine, built from the pinned ChessWOW Stockfish 19 source commit. The build includes JNI libraries for `arm64-v8a` and `armeabi-v7a`, plus the official Stockfish 19 NNUE network. Morphe inserts these files into the patched APK as assets; the extension extracts them to the app-private files directory and loads the native library by absolute path.
+
+The local UCI engine uses **2 threads**, a **64 MB hash**, **3 MultiPV lines** for the regular analysis, and **4 lines at depth 18** for the separate purple pass. The normal pass targets depth 12. Searches run on a dedicated worker and are serialized; when a position changes, the previous search is stopped and its final UCI response is drained before the next FEN is sent. The NNUE network is extracted once and reused.
+
+The existing Chess API, Lichess Cloud Eval and Stockfish Online paths remain as fallbacks when the local library, ABI or NNUE cannot be loaded, or when local analysis fails. In those cases the patch retains the previous bounded network-provider behavior. A first position can also use the remote fallback if local initialization has not completed yet.
+
+When the local engine is ready, regular and deep FEN analysis stays on-device and does not need to be sent to those providers. Initial setup requires roughly 90 MB of additional private storage for the NNUE network, in addition to the native libraries. Internet is still needed for fallback analysis and normal Chess.com functions.
+
+Stockfish is licensed under GPL-3.0-or-later. The patch bundle includes its license and authors file. Corresponding source: [ChessWOW Stockfish 19 pinned source](https://github.com/chesswow/stockfish/tree/028e24b5d52bf652fba036084d9a7040d4020111), based on upstream Stockfish tag `sf_19`.
 
 ## Compatibility and build
 
