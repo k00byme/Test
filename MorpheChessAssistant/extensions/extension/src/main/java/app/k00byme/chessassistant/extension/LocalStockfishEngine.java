@@ -12,10 +12,13 @@ import app.chesswow.engine.StockfishNative;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -42,6 +45,8 @@ final class LocalStockfishEngine {
     private static final String ENGINE_DIR = "stockfish19";
     private static final String NNUE_NAME = "nn-1a298aa575a0.nnue";
     private static final String NNUE_ASSET = "stockfish/" + NNUE_NAME;
+    private static final String NNUE_SHA256 =
+            "1a298aa575a085434d29027978dc36867fe9c5bcea9376654b7a8eba1e52dfc2";
     private static final long MIN_NNUE_BYTES = 80L * 1024L * 1024L;
     private static final long MIN_LIBRARY_BYTES = 1024L * 1024L;
     private static final long UCI_START_TIMEOUT_MS = 20000L;
@@ -161,6 +166,10 @@ final class LocalStockfishEngine {
 
         File nnue = copyAssetIfNeeded(
                 context.getAssets(), NNUE_ASSET, new File(root, NNUE_NAME), MIN_NNUE_BYTES);
+        if (!matchesSha256(nnue, NNUE_SHA256)) {
+            throw new IOException("a rede NNUE do Stockfish não passou na verificação SHA-256");
+        }
+
         File library = findAndCopyLibrary(context, root);
         if (library == null) {
             throw new IOException("não há biblioteca Stockfish para a ABI deste aparelho");
@@ -200,6 +209,23 @@ final class LocalStockfishEngine {
                 throw new TimeoutException("Stockfish não terminou de carregar a rede NNUE");
             }
         }
+    }
+
+    private static boolean matchesSha256(File file, String expected)
+            throws IOException, NoSuchAlgorithmException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] buffer = new byte[128 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                digest.update(buffer, 0, count);
+            }
+        }
+        StringBuilder actual = new StringBuilder(64);
+        for (byte value : digest.digest()) {
+            actual.append(String.format(java.util.Locale.US, "%02x", value & 0xff));
+        }
+        return expected.equalsIgnoreCase(actual.toString());
     }
 
     private static File findAndCopyLibrary(Context context, File root) throws IOException {
