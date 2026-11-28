@@ -33,14 +33,9 @@ The player's color is read from exposed activity/board metadata when available, 
 
 ## Native Chess.com move feedback and Coach Icons
 
-The Coach-style move markers use Chess.com's own live move-classification result and the original vector drawables shipped in the APK. This avoids running a separate browser userscript engine inside the Android app; the icon layer works alongside the local Stockfish assistant.
+The Coach-style markers use the exact inline SVG icon fragments and `CLASSES` color/tint table from **Chess.com Coach Icons (Play vs Computer) v2.0.0** by Bjorn Nicolaij (MIT). The SVGs are ported to Android VectorDrawable assets without substituting Chess.com APK drawables, emoji, or generated fallback icons. The original class colors and 36% circular badge layout are retained, as is the 50% move-square tint (except for `forced`, matching the source script). The source attribution and MIT notice are bundled with the assets.
 
-Two live-game signals are preserved:
-
-1. The board's native `MoveFeedback` constructor, which carries immediate states such as `CORRECT` and `INCORRECT`.
-2. The return value of `PositionAnalysis.c`, which is `PositionAnalysis$b`. Its native `AnalysisMoveClassification` enum is read from field `d`, and the post-move position from field `a`.
-
-The overlay uses Chess.com's original drawable resources for classifications such as `BRILLIANT`, `GREAT`, `BEST`, `EXCELLENT`, `GOOD`, `INACCURACY`, `MISTAKE`, `BLUNDER`, `MISS`, and `FORCED`. No feedback text panel is shown. The old Game Review, puzzle, lesson, and battle feedback hooks are not installed.
+The only visual classification source is the return value of `PositionAnalysis.c`, which is `PositionAnalysis$b`: enum field `d` supplies the class and field `a` supplies the post-move position. Only the 11 known Coach Icons classes are accepted: `BRILLIANT`, `GREAT`, `BEST`, `EXCELLENT`, `GOOD`, `BOOK`, `INACCURACY`, `MISTAKE`, `MISS`, `BLUNDER`, and `FORCED`. Unknown values are ignored instead of being resolved to an arbitrary resource. The immediate `MoveFeedback` hook remains for compatibility, but its transient `CORRECT`/`INCORRECT` states are not drawn as move classifications; this prevents competing callbacks from replacing the badge. No separate Stockfish or chess.js engine is started for the icon layer, and no feedback text panel is shown. The old Game Review, puzzle, lesson, and battle feedback hooks are not installed.
 
 ## Local Stockfish 19 engine
 
