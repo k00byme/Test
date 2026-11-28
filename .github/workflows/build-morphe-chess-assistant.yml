@@ -105,6 +105,12 @@ jobs:
           test -s "$PAYLOAD/AUTHORS"
           test -s "$PAYLOAD/STOCKFISH-SOURCE.txt"
           test "$(sha256sum "$PAYLOAD/nn-1a298aa575a0.nnue" | cut -d' ' -f1)" = "$NNUE_SHA256"
+
+          COACH_ICONS="MorpheChessAssistant/patches/src/main/resources/coach-icons"
+          for ICON in brilliant great best excellent good book inaccuracy mistake miss blunder forced; do
+            test -s "$COACH_ICONS/$ICON.xml"
+          done
+          test -s "$COACH_ICONS/ATTRIBUTION.txt"
           readelf -h "$PAYLOAD/arm64-v8a/libchesswow_stockfish.so" | grep -q "AArch64"
           readelf -h "$PAYLOAD/armeabi-v7a/libchesswow_stockfish.so" | grep -q "ARM"
 
@@ -135,6 +141,10 @@ jobs:
           unzip -l "$MPP" | grep -q 'native-stockfish/armeabi-v7a/libchesswow_stockfish.so'
           unzip -l "$MPP" | grep -q 'native-stockfish/nn-1a298aa575a0.nnue'
           unzip -l "$MPP" | grep -q 'native-stockfish/STOCKFISH-SOURCE.txt'
+          for ICON in brilliant great best excellent good book inaccuracy mistake miss blunder forced; do
+            unzip -l "$MPP" | grep -q "coach-icons/$ICON.xml"
+          done
+          unzip -l "$MPP" | grep -q 'coach-icons/ATTRIBUTION.txt'
           unzip -t "$MPP"
           sha256sum "$MPP"
 
