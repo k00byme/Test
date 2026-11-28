@@ -1,5 +1,5 @@
 name: Build Morphe Chess Assistant
-run-name: Build Chess Assistant with local Stockfish 19
+run-name: Build Chess Assistant Stockfish 19 - Coach Icons + Green/Purple arrows
 
 on:
   push:
