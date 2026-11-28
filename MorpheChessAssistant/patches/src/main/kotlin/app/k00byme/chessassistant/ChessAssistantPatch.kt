@@ -70,6 +70,23 @@ val chessAssistantPatch = patch(
             "assets/stockfish/STOCKFISH-SOURCE.txt"
         )
 
+        // Ship the exact SVG-derived Coach Icons artwork/color table as APK assets.
+        // The extension loads only these named resources; no APK drawable guessing.
+        val coachIconNames = listOf(
+            "brilliant", "great", "best", "excellent", "good", "book",
+            "inaccuracy", "mistake", "miss", "blunder", "forced"
+        )
+        coachIconNames.forEach { iconName ->
+            copyBundledResource(
+                "coach-icons/$iconName.xml",
+                "assets/coach-icons/$iconName.xml"
+            )
+        }
+        copyBundledResource(
+            "coach-icons/ATTRIBUTION.txt",
+            "assets/coach-icons/ATTRIBUTION.txt"
+        )
+
         fun hookActivity(className: String) {
             val fingerprint = Fingerprint(
                 definingClass = className,
