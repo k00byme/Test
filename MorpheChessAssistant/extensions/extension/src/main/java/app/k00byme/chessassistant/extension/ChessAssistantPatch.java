@@ -93,16 +93,16 @@ public final class ChessAssistantPatch {
             };
 
     private static final int FAST_ENGINE_DEPTH = 12;
-    // The UI displays three regular arrows, so do not ask the provider to calculate
-    // two additional variants that cannot be shown.
-    private static final int FAST_ENGINE_VARIANTS = 3;
+    // Keep one hidden backup line for bot AUTO; only the best green line is drawn.
+    private static final int FAST_ENGINE_VARIANTS = 2;
     private static final int ENGINE_DEPTH = 12;
     // Local Stockfish receives a high depth ceiling and stops by its time budget.
     private static final int LOCAL_ENGINE_DEPTH = 30;
     private static final int LOCAL_SPECIAL_ENGINE_DEPTH = 30;
     private static final int LOCAL_SPECIAL_ENGINE_VARIANTS = 1;
-    private static final int ENGINE_REQUEST_VARIANTS = 3;
-    private static final int ENGINE_VARIANTS = 3;
+    private static final int ENGINE_REQUEST_VARIANTS = 2;
+    // The second line remains internal for AUTO; only candidate zero is rendered.
+    private static final int ENGINE_VARIANTS = 2;
     private static final int FAST_ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final int ENGINE_MAX_THINKING_TIME_MS = 100;
     private static final long BOARD_POLL_INTERVAL_MS = 350L;
@@ -749,8 +749,8 @@ public final class ChessAssistantPatch {
         private void applyEngineResult(String fen, EngineResult result, boolean completed) {
             if (result == null || result.error != null || !fen.equals(activeFen)) return;
 
-            // Always merge the same-FEN snapshots and cap the visible set to three.
-            // This also prevents a 5-line WebSocket packet from creating extra arrows.
+            // Keep at most two same-FEN candidates internally. The second remains
+            // available to AUTO, but BoardDrawing intentionally renders only the best.
             EngineResult previous = new EngineResult(
                     bestMove, evaluation, mate, null, candidates);
             EngineResult combined = combineCandidateResults(result, previous, ENGINE_VARIANTS);
@@ -766,7 +766,7 @@ public final class ChessAssistantPatch {
             String evalText = result.mate != 0
                     ? "Mate em " + result.mate
                     : String.format(java.util.Locale.US, "%+.2f", result.evaluation);
-            String mode = candidates.length >= 3 ? "3 linhas"
+            String mode = candidates.length >= 2 ? "2 linhas internas"
                     : candidates.length + " linha(s) disponível(is)";
             int actualDepth = candidates.length > 0 ? candidates[0].depth : LOCAL_ENGINE_DEPTH;
             analysisSummary = "STOCKFISH 19  •  profundidade " + actualDepth
@@ -2759,17 +2759,11 @@ public final class ChessAssistantPatch {
     }
 
     private static final class BoardDrawing extends View {
-        static final int[] MOVE_COLORS = {
-                0xFF37D69A, // Best
-                0xFFFFC857, // Good / medium
-                0xFFF07878  // Least favorable
-        };
+        static final int[] MOVE_COLORS = {0xFF37D69A}; // Best regular move
 
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fromSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint toSquarePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint bubblePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint bubbleTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private View board;
         private CandidateMove[] candidates = new CandidateMove[0];
         private double evaluation = 0.0;
@@ -2812,9 +2806,10 @@ public final class ChessAssistantPatch {
         }
 
         /**
-         * Resolve the exact vector drawable shipped in Chess.com's original APK.
-         * Prefer its move-circle glyph; use its original move-classification drawable
-         * for classifications that do not have a dedicated board glyph.
+         * Coach Icons adapter: use Chess.com's own live move classification and
+         * original APK vector glyphs instead of injecting a browser userscript or
+         * starting a second Stockfish/chess.js engine alongside the local engine.
+         * Prefer the move-circle glyph; fall back to the native classification drawable.
          */
         private static Drawable loadOriginalFeedbackDrawable(Context context, String classification) {
             if (context == null || classification == null || classification.isEmpty()) return null;
@@ -2873,13 +2868,14 @@ public final class ChessAssistantPatch {
                     left - barGap, top + size * (1.0f - normalized),
                     dp(getContext(), 2), dp(getContext(), 2), paint);
 
-            // Weaker alternatives are painted first; the best move remains on top.
-            for (int i = candidates.length - 1; i >= 0; i--) {
-                drawCandidate(canvas, candidates[i], i, left, top, square, false);
+            // Only the best regular line is shown in green. The second line is
+            // retained internally for AUTO but does not draw a yellow/red arrow.
+            if (candidates.length > 0) {
+                drawCandidate(canvas, candidates[0], 0, left, top, square, false);
             }
             if (isUciMove(specialMove)) {
                 CandidateMove exceptional = new CandidateMove(
-                        specialMove, evaluation, mate, SPECIAL_ENGINE_DEPTH, false, "ESPECIAL");
+                        specialMove, evaluation, mate, SPECIAL_ENGINE_DEPTH, false, "");
                 drawCandidate(canvas, exceptional, 0, left, top, square, true);
             }
             drawNativeFeedbackMarker(canvas, left, top, square);
@@ -2971,25 +2967,6 @@ public final class ChessAssistantPatch {
             paint.setStyle(Paint.Style.FILL);
             canvas.drawPath(arrowHead, paint);
 
-            String badge = special ? "ESPECIAL" : (index + 1) + " · " + candidate.label;
-            bubbleTextPaint.setColor(0xFFFFFFFF);
-            bubbleTextPaint.setTextSize(dp(getContext(), 9));
-            bubbleTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            float padX = dp(getContext(), 5);
-            float padY = dp(getContext(), 3);
-            float textWidth = bubbleTextPaint.measureText(badge);
-            float bubbleWidth = textWidth + padX * 2;
-            float bubbleHeight = dp(getContext(), 17);
-            float bubbleLeft = Math.max(left, Math.min(left + square * 8 - bubbleWidth,
-                    endX - bubbleWidth / 2.0f));
-            float bubbleTop = Math.max(top, Math.min(top + square * 8 - bubbleHeight,
-                    endY - bubbleHeight - dp(getContext(), 5)));
-            bubblePaint.setColor((color & 0x00FFFFFF) | 0xE6000000);
-            canvas.drawRoundRect(new RectF(bubbleLeft, bubbleTop,
-                    bubbleLeft + bubbleWidth, bubbleTop + bubbleHeight),
-                    dp(getContext(), 5), dp(getContext(), 5), bubblePaint);
-            canvas.drawText(badge, bubbleLeft + padX,
-                    bubbleTop + bubbleHeight - padY, bubbleTextPaint);
 
         }
 
