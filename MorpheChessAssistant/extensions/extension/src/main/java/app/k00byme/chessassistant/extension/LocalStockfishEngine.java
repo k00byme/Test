@@ -373,7 +373,7 @@ final class LocalStockfishEngine {
             long hardDeadline = SystemClock.elapsedRealtime() + Math.max(2000L, timeoutMs);
             long usableBudget = Math.max(1200L, timeoutMs - 900L);
             long primaryBudget = multiPv > 1
-                    ? Math.max(1000L, usableBudget * 68L / 100L) : usableBudget;
+                    ? Math.max(1000L, usableBudget * 80L / 100L) : usableBudget;
             long alternativesBudget = multiPv > 1
                     ? Math.max(0L, usableBudget - primaryBudget) : 0L;
 
