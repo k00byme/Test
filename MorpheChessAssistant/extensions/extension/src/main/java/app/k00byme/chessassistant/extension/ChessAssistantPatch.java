@@ -232,26 +232,9 @@ public final class ChessAssistantPatch {
      * the immediate feedback states used by Chess.com's coach/training flow.
      */
     public static void onBoardMoveFeedback(Object move, Object feedbackType) {
-        try {
-            if (feedbackType == null) return;
-            String value = feedbackType instanceof Enum
-                    ? ((Enum<?>) feedbackType).name()
-                    : String.valueOf(feedbackType);
-            value = value == null ? "" : value.trim().toUpperCase(java.util.Locale.US);
-            if ("NONE".equals(value) || "MOVE".equals(value) || value.isEmpty()) return;
-
-            if (!"CORRECT".equals(value) && !"INCORRECT".equals(value)) return;
-
-            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
-            if (overlay == null || overlay.closed) return;
-            String destination = readMoveDestination(move);
-            if (destination.isEmpty()) return;
-            String positionFen = readFen(overlay.boardView);
-            if (!isFen(positionFen)) positionFen = overlay.activeFen;
-            overlay.showNativeFeedback(value, destination, positionFen);
-        } catch (Throwable ignored) {
-            // Feedback collection must never be able to break a game or its analysis.
-        }
+        // Keep this native callsite hook for compatibility, but do not render its
+        // transient CORRECT/INCORRECT states as Coach move classes. The badge has
+        // one source of truth: PositionAnalysis.c's final move classification.
     }
 
     /**
@@ -265,30 +248,25 @@ public final class ChessAssistantPatch {
 
             Object classificationValue = readObjectField(feedbackObject, "d");
             if (classificationValue == null) return;
-            String classification = classificationValue instanceof Enum
+            String rawClassification = classificationValue instanceof Enum
                     ? ((Enum<?>) classificationValue).name()
                     : String.valueOf(classificationValue);
-            classification = classification == null ? ""
-                    : classification.trim().toUpperCase(java.util.Locale.US);
-            if (classification.startsWith("MOVE_CLASSIFICATION_")) {
-                classification = classification.substring("MOVE_CLASSIFICATION_".length());
-            }
-            if ("GREAT_FIND".equals(classification)) classification = "GREAT";
-            if (classification.isEmpty() || "NONE".equals(classification)
-                    || "UNSPECIFIED".equals(classification)) return;
+            String classification = CoachIcons.normalize(rawClassification);
+            if (classification.isEmpty()) return;
 
             Object position = readObjectField(feedbackObject, "a");
             if (position == null) return;
             String destination = readLastMoveDestination(position);
-            if (destination.isEmpty()) return;
+            if (!isAlgebraicSquare(destination)) return;
+            String origin = readLastMoveOrigin(position);
 
             AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
             if (overlay == null || overlay.closed) return;
 
             String positionFen = readPositionFen(position);
             if (!isFen(positionFen)) positionFen = readFen(overlay.boardView);
-            if (!isFen(positionFen)) positionFen = overlay.activeFen;
-            overlay.showNativeFeedback(classification, destination, positionFen);
+            if (!isFen(positionFen)) return;
+            overlay.showNativeFeedback(classification, origin, destination, positionFen);
         } catch (Throwable ignored) {
             // Native feedback is observational and must never interrupt a game.
         }
@@ -355,6 +333,64 @@ public final class ChessAssistantPatch {
             }
         }
         return readMoveDestination(position);
+    }
+
+    private static String readLastMoveOrigin(Object position) {
+        if (position == null) return "";
+        Object historyValue = invokeNoArg(position, "h");
+        if (historyValue instanceof List) {
+            List<?> history = (List<?>) historyValue;
+            if (!history.isEmpty()) {
+                Object last = history.get(history.size() - 1);
+                Object previousPosition = readObjectField(last, "a");
+                String origin = originFromFenDiff(
+                        readPositionFen(previousPosition), readPositionFen(position));
+                if (!origin.isEmpty()) return origin;
+
+                Object move = readObjectField(last, "b");
+                origin = readMoveOrigin(move);
+                if (!origin.isEmpty()) return origin;
+                origin = readMoveOrigin(last);
+                if (!origin.isEmpty()) return origin;
+            }
+        }
+        return readMoveOrigin(position);
+    }
+
+    private static String readMoveOrigin(Object move) {
+        if (move == null) return "";
+        List<Object> squares = new ArrayList<>();
+        collectBoardSquares(move, squares, new ArrayList<>(), 0);
+        return squares.size() >= 2 ? squareToAlgebraic(squares.get(0)) : "";
+    }
+
+    private static String originFromFenDiff(String previousFen, String currentFen) {
+        char[][] before = parseFenBoard(previousFen);
+        char[][] after = parseFenBoard(currentFen);
+        if (before == null || after == null) return "";
+
+        String[] previousFields = previousFen.trim().split("\\s+");
+        boolean movedWhite = "w".equals(previousFields[1]);
+        String origin = "";
+        String kingOrigin = "";
+
+        for (int row = 0; row < 8; row++) {
+            for (int file = 0; file < 8; file++) {
+                char oldPiece = before[row][file];
+                char newPiece = after[row][file];
+                if (oldPiece == '.' || oldPiece == 0 || oldPiece == newPiece) continue;
+                if (Character.isUpperCase(oldPiece) != movedWhite) continue;
+
+                String square = String.valueOf((char) ('a' + file))
+                        + String.valueOf(8 - row);
+                if (Character.toLowerCase(oldPiece) == 'k') {
+                    kingOrigin = square;
+                } else if (origin.isEmpty()) {
+                    origin = square;
+                }
+            }
+        }
+        return kingOrigin.isEmpty() ? origin : kingOrigin;
     }
 
     private static char[][] parseFenBoard(String fen) {
@@ -577,11 +613,25 @@ public final class ChessAssistantPatch {
             super.onDetachedFromWindow();
         }
 
-        private void showNativeFeedback(String classification, String destinationSquare, String positionFen) {
+        private void showNativeFeedback(String classification, String originSquare,
+                                        String destinationSquare, String positionFen) {
+            final String coachClass = CoachIcons.normalize(classification);
+            if (coachClass.isEmpty() || !isAlgebraicSquare(destinationSquare)) return;
             MAIN.post(() -> {
-                if (closed || !isAttachedToWindow()) return;
-                nativeFeedbackFen = positionFen == null ? "" : positionFen;
-                drawing.setNativeFeedback(classification, destinationSquare);
+                if (closed || !isAttachedToWindow() || !isFen(positionFen)) return;
+
+                // PositionAnalysis may publish historical/intermediate positions.
+                // Accept only the position currently on the board, including the
+                // short interval before the board poll updates activeFen.
+                String liveFen = readFen(boardView);
+                if (!positionFen.equals(activeFen)
+                        && (!isFen(liveFen) || !positionFen.equals(liveFen))) return;
+
+                // One classification per resulting FEN: duplicate callbacks cannot
+                // replace one class with another or make the icon flicker.
+                if (positionFen.equals(nativeFeedbackFen)) return;
+                nativeFeedbackFen = positionFen;
+                drawing.setNativeFeedback(coachClass, originSquare, destinationSquare);
             });
         }
 
@@ -672,7 +722,7 @@ public final class ChessAssistantPatch {
             drawing.setSpecialMove("");
             if (nativeFeedbackFen.isEmpty() || !nativeFeedbackFen.equals(activeFen)) {
                 nativeFeedbackFen = "";
-                drawing.setNativeFeedback("", "");
+                drawing.setNativeFeedback("", "", "");
             }
             drawing.setEngine(candidates, evaluation, mate, boardView != null && isBoardFlipped(boardView));
         }
@@ -1259,6 +1309,11 @@ public final class ChessAssistantPatch {
         if ("black".equals(text) || "b".equals(text) || "dark".equals(text)
                 || text.endsWith(".black")) return false;
         return null;
+    }
+
+    private static boolean isAlgebraicSquare(String square) {
+        return square != null && square.trim().toLowerCase(java.util.Locale.US)
+                .matches("[a-h][1-8]");
     }
 
     private static boolean isFen(String fen) {
@@ -2771,8 +2826,11 @@ public final class ChessAssistantPatch {
         private boolean flipped;
         private String specialMove = "";
         private String nativeFeedbackClassification = "";
+        private String nativeFeedbackFromSquare = "";
         private String nativeFeedbackSquare = "";
         private Drawable nativeFeedbackDrawable;
+        private final Paint coachTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint coachBadgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         BoardDrawing(Context context) {
             super(context);
@@ -2798,41 +2856,20 @@ public final class ChessAssistantPatch {
             invalidate();
         }
 
-        void setNativeFeedback(String classification, String square) {
-            nativeFeedbackClassification = classification == null ? "" : classification;
-            nativeFeedbackSquare = square == null ? "" : square;
-            nativeFeedbackDrawable = loadOriginalFeedbackDrawable(getContext(), nativeFeedbackClassification);
+        void setNativeFeedback(String classification, String fromSquare, String square) {
+            nativeFeedbackClassification = CoachIcons.normalize(classification);
+            nativeFeedbackFromSquare = isAlgebraicSquare(fromSquare)
+                    ? fromSquare.toLowerCase(java.util.Locale.US) : "";
+            nativeFeedbackSquare = isAlgebraicSquare(square)
+                    ? square.toLowerCase(java.util.Locale.US) : "";
+            nativeFeedbackDrawable = nativeFeedbackClassification.isEmpty()
+                    ? null : CoachIcons.load(getContext(), nativeFeedbackClassification);
+            if (nativeFeedbackDrawable == null) {
+                nativeFeedbackClassification = "";
+                nativeFeedbackFromSquare = "";
+                nativeFeedbackSquare = "";
+            }
             invalidate();
-        }
-
-        /**
-         * Coach Icons adapter: use Chess.com's own live move classification and
-         * original APK vector glyphs instead of injecting a browser userscript or
-         * starting a second Stockfish/chess.js engine alongside the local engine.
-         * Prefer the move-circle glyph; fall back to the native classification drawable.
-         */
-        private static Drawable loadOriginalFeedbackDrawable(Context context, String classification) {
-            if (context == null || classification == null || classification.isEmpty()) return null;
-            String suffix = classification.trim().toLowerCase(java.util.Locale.US);
-            if (suffix.startsWith("move_classification_")) {
-                suffix = suffix.substring("move_classification_".length());
-            }
-            if ("great_find".equals(suffix) || "great".equals(suffix)) suffix = "great";
-
-            int resourceId = context.getResources().getIdentifier(
-                    "glyph_move_circle_" + suffix, "drawable", context.getPackageName());
-            if (resourceId == 0) {
-                String classificationSuffix = "great".equals(suffix) ? "great_find" : suffix;
-                resourceId = context.getResources().getIdentifier(
-                        "move_classification_classification_" + classificationSuffix,
-                        "drawable", context.getPackageName());
-            }
-            if (resourceId == 0) return null;
-            try {
-                return context.getResources().getDrawable(resourceId).mutate();
-            } catch (Throwable ignored) {
-                return null;
-            }
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -2883,24 +2920,50 @@ public final class ChessAssistantPatch {
 
         private void drawNativeFeedbackMarker(Canvas canvas, float left, float top, float square) {
             Drawable drawable = nativeFeedbackDrawable;
-            if (drawable == null || nativeFeedbackSquare.length() != 2) return;
-            char file = nativeFeedbackSquare.charAt(0);
-            char rank = nativeFeedbackSquare.charAt(1);
-            if (file < 'a' || file > 'h' || rank < '1' || rank > '8') return;
+            CoachIcons.Definition definition = CoachIcons.definition(nativeFeedbackClassification);
+            if (drawable == null || definition == null || !isAlgebraicSquare(nativeFeedbackSquare)) return;
 
-            int boardFile = file - 'a';
-            int boardRank = rank - '1';
-            int column = flipped ? 7 - boardFile : boardFile;
-            int row = flipped ? boardRank : 7 - boardRank;
+            int toFile = nativeFeedbackSquare.charAt(0) - 'a';
+            int toRank = nativeFeedbackSquare.charAt(1) - '1';
+            int toColumn = flipped ? 7 - toFile : toFile;
+            int toRow = flipped ? toRank : 7 - toRank;
 
-            // These are the original Chess.com move glyphs, rendered at the
-            // destination square rather than redrawn with custom text or colors.
-            int iconSize = Math.min(dp(getContext(), 24), Math.max(dp(getContext(), 16), (int) (square * 0.48f)));
-            float cellLeft = left + column * square;
-            float cellTop = top + row * square;
-            int iconLeft = Math.round(cellLeft + square - iconSize - dp(getContext(), 2));
-            int iconTop = Math.round(cellTop + dp(getContext(), 2));
-            drawable.setBounds(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize);
+            // Coach Icons v2.0.0: tint both move squares with the class color at 50%.
+            if (definition.tintSquares && isAlgebraicSquare(nativeFeedbackFromSquare)) {
+                int fromFile = nativeFeedbackFromSquare.charAt(0) - 'a';
+                int fromRank = nativeFeedbackFromSquare.charAt(1) - '1';
+                int fromColumn = flipped ? 7 - fromFile : fromFile;
+                int fromRow = flipped ? fromRank : 7 - fromRank;
+                coachTintPaint.setStyle(Paint.Style.FILL);
+                coachTintPaint.setColor(definition.color);
+                coachTintPaint.setAlpha(128);
+                canvas.drawRect(left + fromColumn * square, top + fromRow * square,
+                        left + (fromColumn + 1) * square, top + (fromRow + 1) * square,
+                        coachTintPaint);
+                canvas.drawRect(left + toColumn * square, top + toRow * square,
+                        left + (toColumn + 1) * square, top + (toRow + 1) * square,
+                        coachTintPaint);
+            }
+
+            // Original CSS: 36% circular badge, offset beyond the destination
+            // square, with adjustments for the board's top and right edges.
+            float badgeSize = square * 0.36f;
+            float cellLeft = left + toColumn * square;
+            float cellTop = top + toRow * square;
+            float badgeLeft = cellLeft + square * (toColumn == 7 ? 0.96f : 1.115f) - badgeSize;
+            float badgeTop = cellTop + square * (toRow == 0 ? 0.02f : -0.13f);
+            float centerX = badgeLeft + badgeSize / 2.0f;
+            float centerY = badgeTop + badgeSize / 2.0f;
+
+            coachBadgePaint.setStyle(Paint.Style.FILL);
+            coachBadgePaint.setColor(definition.color);
+            coachBadgePaint.setShadowLayer(Math.max(1.0f, square * 0.035f),
+                    0.0f, square * 0.02f, 0x59000000);
+            canvas.drawCircle(centerX, centerY, badgeSize / 2.0f, coachBadgePaint);
+            coachBadgePaint.clearShadowLayer();
+
+            drawable.setBounds(Math.round(badgeLeft), Math.round(badgeTop),
+                    Math.round(badgeLeft + badgeSize), Math.round(badgeTop + badgeSize));
             drawable.draw(canvas);
         }
 
