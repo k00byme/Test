@@ -11,13 +11,13 @@ Morphe patch bundle for **Chess.com Android 4.10.28-googleplay** (package `com.c
 ## Move assistance
 
 - Stockfish evaluation panel and board-orientation handling.
-- Up to three ordinary candidate arrows: green (best), yellow (second), and red (third).
-- A separate purple arrow for a distinct alternative returned by the deeper search. Tactical labels remain heuristics; the purple line is only available when the deep provider returns a distinct candidate.
+- One ordinary green arrow for the strongest regular line.
+- A separate purple arrow for a distinct alternative returned by the deeper search. Yellow and red candidate arrows are hidden; a second regular line is retained internally only for AUTO. Tactical labels remain heuristics; the purple line is only available when the deep provider returns a distinct candidate.
 - Partial candidate snapshots are merged for the same FEN, so a delayed one-line response does not erase alternatives already received.
 - Stale overlays and old feedback markers are cleared when the active position changes.
 - AUTO never sends moves in human-vs-human games.
 
-The regular analysis asks Chess API's progressive WebSocket for exactly three variations and renders up to three. The WebSocket is the primary source: when it completes a three-line result, the patch does not launch duplicate REST or Stockfish Online requests. Lichess Cloud Eval is queried in parallel only as a cache source; only one Lichess request may be in flight, with a local request interval. If the live stream is incomplete, Chess API HTTPS and Stockfish Online are started as bounded fallback requests. The exact-FEN LRU cache keeps up to 48 completed three-line results, so revisiting an analyzed position can render immediately. Candidate lines are deduplicated by their UCI first move and sorted using the side-to-move evaluation.
+The regular analysis asks Chess API's progressive WebSocket for up to two variations and draws only the top green line. The second line remains hidden and is used only as AUTO's occasional alternative. The WebSocket is the primary source: when it completes a two-line result, the patch does not launch duplicate REST or Stockfish Online requests. Lichess Cloud Eval is queried in parallel only as a cache source; only one Lichess request may be in flight, with a local request interval. If the live stream is incomplete, Chess API HTTPS and Stockfish Online are started as bounded fallback requests. The exact-FEN LRU cache keeps up to 48 completed two-line results, so revisiting an analyzed position can render immediately. Candidate lines are deduplicated by their UCI first move and sorted using the side-to-move evaluation.
 
 ## Rare special assistance
 
@@ -31,7 +31,9 @@ When enabled, it waits for the human player's turn and selects the engine's best
 
 The player's color is read from exposed activity/board metadata when available, with board orientation as a fallback. The control is hidden if no free area exists around the board where it can be displayed without covering squares.
 
-## Native Chess.com move feedback
+## Native Chess.com move feedback and Coach Icons
+
+The Coach-style move markers use Chess.com's own live move-classification result and the original vector drawables shipped in the APK. This avoids running a separate browser userscript engine inside the Android app; the icon layer works alongside the local Stockfish assistant.
 
 Two live-game signals are preserved:
 
@@ -44,7 +46,7 @@ The overlay uses Chess.com's original drawable resources for classifications suc
 
 The patch bundles Stockfish 19 as an in-process native engine, built from the pinned ChessWOW Stockfish 19 source commit. The build includes JNI libraries for `arm64-v8a` and `armeabi-v7a`, plus the official Stockfish 19 NNUE network. Morphe inserts these files into the patched APK as assets; the extension extracts them to the app-private files directory and loads the native library by absolute path.
 
-The local UCI engine uses up to **4 threads** and a **128 MB hash** (with two CPU threads left free where available). Regular analysis now performs a timed **single-PV primary search** with a depth ceiling of 30, then a shorter **MultiPV=3 alternatives pass** that reuses the first pass's transposition table. This keeps the strongest move calculation on MultiPV=1, while preserving the three visible arrows. The separate purple pass also uses a single-PV search with a depth ceiling of 30. Search duration is bounded by the configured 9-second regular and 8.5-second deep budgets rather than stopping at depth 12/18. Searches run on a dedicated worker and are serialized; when a position changes, the previous search is stopped and its final UCI response is drained before the next FEN is sent. The NNUE network is extracted once and reused.
+The local UCI engine uses up to **4 threads** and a **128 MB hash** (with two CPU threads left free where available). Regular analysis performs a timed **single-PV primary search** with a depth ceiling of 30, then a shorter **MultiPV=2 alternatives pass** that reuses the first pass's transposition table. The regular budget is split **80% for the primary line and 20% for the hidden backup line**. Only the best regular line is drawn in green; the purple deep-search arrow remains separate. The separate purple pass also uses a single-PV search with a depth ceiling of 30. Search duration is bounded by the configured 9-second regular and 8.5-second deep budgets rather than stopping at depth 12/18. Searches run on a dedicated worker and are serialized; when a position changes, the previous search is stopped and its final UCI response is drained before the next FEN is sent. The NNUE network is extracted once and reused.
 
 The existing Chess API, Lichess Cloud Eval and Stockfish Online paths remain as fallbacks when the local library, ABI or NNUE cannot be loaded, or when local analysis fails. In those cases the patch retains the previous bounded network-provider behavior. A first position can also use the remote fallback if local initialization has not completed yet.
 
