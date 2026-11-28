@@ -256,16 +256,23 @@ public final class ChessAssistantPatch {
 
             Object position = readObjectField(feedbackObject, "a");
             if (position == null) return;
+            String positionFen = readPositionFen(position);
+            if (!isFen(positionFen)) return;
+
+            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
+            if (overlay == null || overlay.closed || overlay.boardView == null) return;
+
+            // Match the source script's ONLY_MY_MOVES=true behavior: only badge
+            // moves played by the side shown at the bottom of the board.
+            String previousFen = readLastMoveBeforeFen(position);
+            if (!isFen(previousFen)) return;
+            String moverColor = previousFen.trim().split("\\s+")[1];
+            String playerColor = isBoardFlipped(overlay.boardView) ? "b" : "w";
+            if (!playerColor.equals(moverColor)) return;
+
             String destination = readLastMoveDestination(position);
             if (!isAlgebraicSquare(destination)) return;
             String origin = readLastMoveOrigin(position);
-
-            AnalysisOverlay overlay = ACTIVE_OVERLAY.get();
-            if (overlay == null || overlay.closed) return;
-
-            String positionFen = readPositionFen(position);
-            if (!isFen(positionFen)) positionFen = readFen(overlay.boardView);
-            if (!isFen(positionFen)) return;
             overlay.showNativeFeedback(classification, origin, destination, positionFen);
         } catch (Throwable ignored) {
             // Native feedback is observational and must never interrupt a game.
@@ -333,6 +340,16 @@ public final class ChessAssistantPatch {
             }
         }
         return readMoveDestination(position);
+    }
+
+    private static String readLastMoveBeforeFen(Object position) {
+        if (position == null) return "";
+        Object historyValue = invokeNoArg(position, "h");
+        if (!(historyValue instanceof List)) return "";
+        List<?> history = (List<?>) historyValue;
+        if (history.isEmpty()) return "";
+        Object previousPosition = readObjectField(history.get(history.size() - 1), "a");
+        return readPositionFen(previousPosition);
     }
 
     private static String readLastMoveOrigin(Object position) {
